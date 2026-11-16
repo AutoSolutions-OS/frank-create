@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { HUB_URL, OS_HUB_MENU, osFrame } from "autosolutions-os/nav";
+import { HUB_URL, OS_HUB_MENU, PROJECTS_URL, osFrame } from "autosolutions-os/nav";
 import type { OsFrameState } from "autosolutions-os/nav";
 // The glyph table on its own: the package index also loads the components.
 import { NAV_ICONS } from "autosolutions-design-system/components/media/navIcons.js";
@@ -89,11 +89,12 @@ describe("the studio in the workspace frame", () => {
     expect(hub.map((section) => section.title)).toEqual(OS_HUB_MENU.map((section) => section.title));
     expect(hub.flatMap((section) => section.items.map((row) => row.label))).toEqual([
       "Overview", "Inbox", "Calendar", "Tasks", "Slack", "Monday", "Accounts",
-      "Unmarked Agent", "Signature Generator",
+      "Unmarked Agent", "Signature Generator", "Projects",
     ]);
-    // Every row is a link into the Hub, none a place of this app.
+    // Every row is a link into the Hub, none a place of this app; Projects (os 0.4.17) links its own app.
     for (const row of hub.flatMap((section) => section.items)) {
-      expect(row.href?.startsWith(`${HUB_URL}/`), row.id).toBe(true);
+      const base = row.id === "projects" ? PROJECTS_URL : `${HUB_URL}/`;
+      expect(row.href?.startsWith(base), row.id).toBe(true);
       expect(row.path, row.id).toBeUndefined();
     }
   });
