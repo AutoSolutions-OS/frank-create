@@ -34,17 +34,18 @@ describe("Seedance 2.5 1080p and references", () => {
     // 1920 x 1080 x 24 / 1024 = 48,600 tokens/s at $0.0000117.
     expect(wide?.perSecond).toBeCloseTo(0.5686, 3);
     expect(wide?.usd).toBeCloseTo(2.27, 2);
+    // A 1:1 clip at 1080p came back 1440x1440 (live run 53810eaf, 17 Nov).
     const square = videoTokenCost(seedance, { ...base, aspect_ratio: "1:1" });
-    expect(square?.width).toBe(1080);
-    expect(square?.usd).toBeCloseTo(1.28, 2);
+    expect(square?.width).toBe(1440);
+    expect(square?.usd).toBeCloseTo(2.27, 2);
   });
 
   it("a video reference uses the video-input rate and counts its own seconds", () => {
-    const withClip = videoTokenCost(seedance, { ...base, aspect_ratio: "1:1" }, 3);
-    // (4 + 3) s x 27,337.5 tokens/s x $0.000007.
-    expect(withClip?.usd).toBeCloseTo(1.34, 2);
+    // Live run 53810eaf: 4 s at 1080p 1:1 with a 3.0417 s clip, OpenRouter billed $2.395575.
+    const live = videoTokenCost(seedance, { ...base, aspect_ratio: "1:1" }, 3.041667);
+    expect(live?.usd).toBeCloseTo(2.3956, 3);
     expect(estimateVideoCost(seedance, { ...base, aspect_ratio: "1:1" }, { videoInputSeconds: 3 }))
-      .toBe("approx. ~$1.34 · 4s @ 1080p · + 3s video ref · 1080x1080");
+      .toBe("approx. ~$2.38 · 4s @ 1080p · + 3s video ref · 1440x1440");
   });
 
   it("other video models keep their per-second estimate", () => {

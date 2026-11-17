@@ -22,7 +22,7 @@ export const RELEASES: ReleaseNote[] = [
       "Seedance 2.5 now renders at 1080p as well as 480p and 720p.",
       "New switch under the brief: Frames or References. Frames works as before: @ref1 starts the clip, @ref2 ends it. References: every image and clip guides the clip, and no frame is fixed.",
       "You can add a video clip as a reference: upload an MP4, MOV or WEBM, or pick a clip you made. A clip must be at least 640x640 or 854x480.",
-      "The price shown before a run follows OpenRouter's per-token rate. A 4 second square clip at 1080p costs about $1.28. A video reference counts its own seconds too.",
+      "The price shown before a run follows OpenRouter's per-token rate. At 1080p a clip costs about $0.57 a second in every shape (a square clip is 1440 x 1440). A video reference costs less per second, but its own seconds are billed too: a 4 second 1080p clip with a 3 second reference cost $2.40.",
     ],
   },
   {
