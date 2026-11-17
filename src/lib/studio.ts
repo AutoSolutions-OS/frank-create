@@ -845,6 +845,27 @@ export function planVideoReferences<T extends { media_type?: string }>(
   return { mode: "frames", firstFrame, lastFrame, references: usable };
 }
 
+/**
+ * A reference clip below the model's smallest size, as a sentence for the
+ * brief box. Clips of unknown size pass: the provider then says no itself.
+ */
+export function videoReferenceSizeError(
+  model: StudioModel | undefined | null,
+  references: { title?: string; media_type?: string; width?: number; height?: number }[]
+): string | undefined {
+  const min = Number(model?.min_video_reference_pixels);
+  if (!model || !Number.isFinite(min) || min <= 0) return undefined;
+  const small = references.find((ref) => {
+    if (ref.media_type !== "video") return false;
+    const w = Number(ref.width);
+    const h = Number(ref.height);
+    return Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0 && w * h < min;
+  });
+  if (!small) return undefined;
+  const name = model.short_label ?? model.label;
+  return `${name} needs reference clips of at least 640x640 or 854x480. "${(small.title || "This clip").trim()}" is ${small.width}x${small.height}.`;
+}
+
 /** Seconds of video in the references, for the estimate (unknown length counts as 0). */
 export function referenceVideoSeconds(references: { media_type?: string; duration?: number }[]): number {
   return references

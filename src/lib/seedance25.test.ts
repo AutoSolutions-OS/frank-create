@@ -8,6 +8,7 @@ import {
   normalizeVideoSettings,
   planVideoReferences,
   referenceVideoSeconds,
+  videoReferenceSizeError,
   videoTokenCost
 } from "./studio";
 import type { StudioModel, StudioSettings } from "./types";
@@ -33,17 +34,18 @@ describe("Seedance 2.5 1080p and references", () => {
     // 1920 x 1080 x 24 / 1024 = 48,600 tokens/s at $0.0000117.
     expect(wide?.perSecond).toBeCloseTo(0.5686, 3);
     expect(wide?.usd).toBeCloseTo(2.27, 2);
+    // A 1:1 clip at 1080p came back 1440x1440 (live run 53810eaf, 17 Nov).
     const square = videoTokenCost(seedance, { ...base, aspect_ratio: "1:1" });
-    expect(square?.width).toBe(1080);
-    expect(square?.usd).toBeCloseTo(1.28, 2);
+    expect(square?.width).toBe(1440);
+    expect(square?.usd).toBeCloseTo(2.27, 2);
   });
 
   it("a video reference uses the video-input rate and counts its own seconds", () => {
-    const withClip = videoTokenCost(seedance, { ...base, aspect_ratio: "1:1" }, 3);
-    // (4 + 3) s x 27,337.5 tokens/s x $0.000007.
-    expect(withClip?.usd).toBeCloseTo(1.34, 2);
+    // Live run 53810eaf: 4 s at 1080p 1:1 with a 3.0417 s clip, OpenRouter billed $2.395575.
+    const live = videoTokenCost(seedance, { ...base, aspect_ratio: "1:1" }, 3.041667);
+    expect(live?.usd).toBeCloseTo(2.3956, 3);
     expect(estimateVideoCost(seedance, { ...base, aspect_ratio: "1:1" }, { videoInputSeconds: 3 }))
-      .toBe("approx. ~$1.34 · 4s @ 1080p · + 3s video ref · 1080x1080");
+      .toBe("approx. ~$2.38 · 4s @ 1080p · + 3s video ref · 1440x1440");
   });
 
   it("other video models keep their per-second estimate", () => {
@@ -102,5 +104,25 @@ describe("reference manifest with clips", () => {
     expect(buildReferenceManifest([{ title: "A" }])).toBe(
       "REFERENCE IMAGE MANIFEST (attached in this exact order):\nReference image 1 (@ref1) = A"
     );
+  });
+});
+
+describe("reference clip size", () => {
+  it("a clip under 407,696 pixels is named before the run", () => {
+    expect(videoReferenceSizeError(seedance, [{ title: "flying saucer", media_type: "video", width: 480, height: 480 }]))
+      .toBe('Seedance 2.5 needs reference clips of at least 640x640 or 854x480. "flying saucer" is 480x480.');
+  });
+
+  it("640x640, 854x480, images and clips of unknown size pass", () => {
+    expect(videoReferenceSizeError(seedance, [
+      { media_type: "video", width: 640, height: 640 },
+      { media_type: "video", width: 854, height: 480 },
+      { media_type: "image", width: 100, height: 100 },
+      { media_type: "video" }
+    ])).toBeUndefined();
+  });
+
+  it("models without a minimum never complain", () => {
+    expect(videoReferenceSizeError(grok, [{ media_type: "video", width: 10, height: 10 }])).toBeUndefined();
   });
 });

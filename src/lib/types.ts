@@ -82,6 +82,8 @@ export interface StudioModel {
    * (reference-to-video), not only start/end frames.
    */
   supports_video_references?: boolean;
+  /** Video-only: smallest reference clip the provider takes, in pixels (width x height). */
+  min_video_reference_pixels?: number;
   /** Upscale-only: which controls this model's Replicate schema exposes. */
   upscale_controls?: UpscaleControl[];
   /** Upscale-only: enums straight from the provider schema. */

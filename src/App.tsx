@@ -78,6 +78,7 @@ import {
   planVideoReferences,
   referenceVideoSeconds,
   supportsVideoReferences,
+  videoReferenceSizeError,
 } from "./lib/studio";
 import type { StudioFieldErrors, VideoReferenceMode } from "./lib/studio";
 
@@ -147,26 +148,37 @@ const REFERENCE_PICKER_PAGE_SIZE = 9;
 const REFERENCE_VIDEO_TYPES = new Set(["video/mp4", "video/quicktime", "video/webm"]);
 const REFERENCE_VIDEO_ACCEPT = Array.from(REFERENCE_VIDEO_TYPES).join(",");
 
-/** Clip length in whole seconds from its metadata, or undefined if the browser cannot read it. */
-function readVideoDuration(url: string): Promise<number | undefined> {
+type VideoMeta = { duration?: number; width?: number; height?: number };
+
+/** Length (seconds) and pixel size of a clip from its metadata. */
+function videoMetaOf(video: HTMLVideoElement): VideoMeta {
+  const seconds = Number(video.duration);
+  return {
+    duration: Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 10) / 10 : undefined,
+    width: video.videoWidth || undefined,
+    height: video.videoHeight || undefined
+  };
+}
+
+/** Read a clip's metadata, or {} if the browser cannot. */
+function readVideoMeta(url: string): Promise<VideoMeta> {
   return new Promise((resolve) => {
-    if (typeof document === "undefined") return resolve(undefined);
+    if (typeof document === "undefined") return resolve({});
     const video = document.createElement("video");
-    const done = (value: number | undefined) => {
+    const done = (value: VideoMeta) => {
       video.removeAttribute("src");
       resolve(value);
     };
-    const timer = setTimeout(() => done(undefined), 8000);
+    const timer = setTimeout(() => done({}), 8000);
     video.preload = "metadata";
     video.muted = true;
     video.onloadedmetadata = () => {
       clearTimeout(timer);
-      const seconds = Number(video.duration);
-      done(Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 10) / 10 : undefined);
+      done(videoMetaOf(video));
     };
     video.onerror = () => {
       clearTimeout(timer);
-      done(undefined);
+      done({});
     };
     video.src = url;
   });
@@ -857,6 +869,25 @@ export default function App() {
   const videoReferenceSecondsLoaded =
     videoPlan.mode === "references" ? referenceVideoSeconds(videoPlan.references) : 0;
 
+  /** A clip's size and length, read from its dock thumbnail when the asset did not say. */
+  function fillVideoMeta(assetId: string, video: HTMLVideoElement) {
+    const meta = videoMetaOf(video);
+    setAssets((current) => {
+      const target = current.find((asset) => asset.id === assetId);
+      if (!target || (target.width && target.height && target.duration)) return current;
+      return current.map((asset) =>
+        asset.id === assetId
+          ? {
+              ...asset,
+              width: asset.width ?? meta.width,
+              height: asset.height ?? meta.height,
+              duration: asset.duration ?? meta.duration
+            }
+          : asset
+      );
+    });
+  }
+
   function clearReferenceDock() {
     setActiveReferenceIds([]);
     setReferencePreviewAsset(null);
@@ -876,10 +907,14 @@ export default function App() {
 
 
 
-  const baseFieldErrors = useMemo(
-    () => validateStudioSettings(modelOptions.model, settings, { referenceCount: selectedReferenceAssets.length }),
-    [modelOptions.model, settings, selectedReferenceAssets.length]
-  );
+  const baseFieldErrors = useMemo(() => {
+    const errors = validateStudioSettings(modelOptions.model, settings, { referenceCount: selectedReferenceAssets.length });
+    // Seedance 2.5 refuses small reference clips; say so before the run, not after.
+    const clipError = videoPlan.mode === "references" && isVideoModel(selectedModel)
+      ? videoReferenceSizeError(selectedModel, videoPlan.references)
+      : undefined;
+    return clipError && !errors.references ? { ...errors, references: clipError } : errors;
+  }, [modelOptions.model, settings, selectedReferenceAssets.length, videoPlan, selectedModel]);
   // Side-by-side: resolve the shared settings against each model and surface
   // every snap so the user can approve it before we spend two calls.
   const compareResolved = useMemo(() => {
@@ -1406,7 +1441,8 @@ export default function App() {
       const localPreview = isVideo
         ? URL.createObjectURL(file)
         : await fileToDataUrl(file).catch(() => URL.createObjectURL(file));
-      const duration = isVideo ? await readVideoDuration(localPreview) : undefined;
+      const meta: VideoMeta = isVideo ? await readVideoMeta(localPreview) : {};
+      const duration = meta.duration;
       let remoteUrl: string | undefined;
       let storagePath: string | undefined;
       let uploadedReference: Asset | undefined;
@@ -1424,6 +1460,8 @@ export default function App() {
             media_type: mediaType,
             mime: file.type || undefined,
             duration,
+            width: meta.width,
+            height: meta.height,
             sync_status: "cloud"
           });
           uploadedReference = {
@@ -1435,6 +1473,8 @@ export default function App() {
             kind: "reference",
             media_type: mediaType,
             duration: created.asset.duration ?? duration,
+            width: created.asset.width ?? meta.width,
+            height: created.asset.height ?? meta.height,
             favorite: created.asset.favorite ?? false,
             sync_status: "cloud"
           };
@@ -1452,6 +1492,8 @@ export default function App() {
         title: file.name,
         media_type: mediaType,
         duration,
+        width: meta.width,
+        height: meta.height,
         file_path: storagePath,
         preview_url: localPreview,
         remote_url: remoteUrl,
@@ -2906,9 +2948,10 @@ export default function App() {
                             playsInline
                             preload="metadata"
                             aria-label={`Video reference ${asset.title}`}
+                            onLoadedMetadata={(event) => fillVideoMeta(asset.id, event.currentTarget)}
                           />
                         ) : asset.preview_url ? <img src={thumbnailUrl(asset.preview_url, 160, 35, "webp")} alt={asset.title} loading="lazy" /> : <Icon source="photo" tone="inherit" size={15} />}
-                        {asset.media_type === "video" ? <span className="reference-video-badge" aria-hidden="true">Video</span> : null}
+                        {asset.media_type === "video" ? <span className="reference-video-badge" aria-hidden="true">▶</span> : null}
                         <button
                           type="button"
                           className="reference-tag"
@@ -3089,9 +3132,12 @@ export default function App() {
                   let note: React.ReactNode;
                   if (referencesMode) {
                     const last = referenceTagFor(refs - 1);
+                    const which = refs === 1
+                      ? <><strong>@ref1</strong> guides</>
+                      : <><strong>@ref1</strong> to <strong>{last}</strong> guide</>;
                     note = hasVideoRef
-                      ? <>A video clip is loaded, so {refs === 1 ? <strong>@ref1</strong> : <><strong>@ref1</strong> to <strong>{last}</strong></>} guide the clip. No start or end frame.</>
-                      : <>{refs === 1 ? <strong>@ref1</strong> : <><strong>@ref1</strong> to <strong>{last}</strong></>} guide the clip. No start or end frame.</>;
+                      ? <>A video clip is loaded, so {which} the clip. No start or end frame.</>
+                      : <>{which} the clip. No start or end frame.</>;
                   } else if (canReference && refs === 0) {
                     note = "Add images or video clips as references, or 1 to 2 images as start and end frames.";
                   } else if (endFrames) {
@@ -3603,7 +3649,9 @@ export default function App() {
             <button className="lightbox-close" type="button" onClick={() => setReferencePreviewAsset(null)} aria-label="Close reference preview">
               <Icon source="x-mark" tone="inherit" size={18} />
             </button>
-            {referencePreviewAsset.preview_url ? (
+            {referencePreviewAsset.media_type === "video" && referencePreviewAsset.preview_url ? (
+              <video src={referencePreviewAsset.preview_url} controls muted playsInline aria-label={referencePreviewAsset.title} />
+            ) : referencePreviewAsset.preview_url ? (
               <img src={referencePreviewAsset.preview_url} alt={referencePreviewAsset.title} />
             ) : (
               <div className="reference-preview-placeholder"><Icon source="photo" tone="inherit" size={48} /></div>
