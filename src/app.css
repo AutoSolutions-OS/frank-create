@@ -437,7 +437,19 @@ matched to the system's
 .reference-thumb img,
 .reference-thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
 /* A video reference: small "Video" mark top-left, the @ref tag stays at the bottom. */
-.reference-video-badge,
+.reference-video-badge {
+  position: absolute;
+  inset-block-start: 2px;
+  inset-inline-start: 2px;
+  padding: 0 2px;
+  border-radius: var(--radius-100);
+  background: rgba(10, 10, 10, 0.72);
+  color: #fff;
+  font-size: 8px;
+  line-height: 11px;
+  pointer-events: none;
+}
+.reference-preview-inner video { max-width: 100%; max-height: 70vh; display: block; }
 .reference-picker-card-video {
   position: absolute;
   inset-block-start: 2px;

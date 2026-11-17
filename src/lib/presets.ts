@@ -479,6 +479,9 @@ export const fallbackConfig: FrankConfig = {
       allowed_resolutions: ["480p", "720p", "1080p"],
       supports_last_frame: true,
       supports_video_references: true,
+      // ByteDance refused a 480x480 clip (17 Nov 2026): "video pixel count ...
+      // must be greater than or equal to 407696". 640x640 and 854x480 pass.
+      min_video_reference_pixels: 407696,
       reference_image_limit: 9,
       max_count: 1,
       cost_label: "premium",

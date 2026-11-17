@@ -8,6 +8,7 @@ import {
   normalizeVideoSettings,
   planVideoReferences,
   referenceVideoSeconds,
+  videoReferenceSizeError,
   videoTokenCost
 } from "./studio";
 import type { StudioModel, StudioSettings } from "./types";
@@ -102,5 +103,25 @@ describe("reference manifest with clips", () => {
     expect(buildReferenceManifest([{ title: "A" }])).toBe(
       "REFERENCE IMAGE MANIFEST (attached in this exact order):\nReference image 1 (@ref1) = A"
     );
+  });
+});
+
+describe("reference clip size", () => {
+  it("a clip under 407,696 pixels is named before the run", () => {
+    expect(videoReferenceSizeError(seedance, [{ title: "flying saucer", media_type: "video", width: 480, height: 480 }]))
+      .toBe('Seedance 2.5 needs reference clips of at least 640x640 or 854x480. "flying saucer" is 480x480.');
+  });
+
+  it("640x640, 854x480, images and clips of unknown size pass", () => {
+    expect(videoReferenceSizeError(seedance, [
+      { media_type: "video", width: 640, height: 640 },
+      { media_type: "video", width: 854, height: 480 },
+      { media_type: "image", width: 100, height: 100 },
+      { media_type: "video" }
+    ])).toBeUndefined();
+  });
+
+  it("models without a minimum never complain", () => {
+    expect(videoReferenceSizeError(grok, [{ media_type: "video", width: 10, height: 10 }])).toBeUndefined();
   });
 });

@@ -15,6 +15,17 @@ export interface ReleaseNote {
  */
 export const RELEASES: ReleaseNote[] = [
   {
+    id: "2026-11-17-seedance-2-5-1080p-references",
+    date: "17 November 2026",
+    title: "Seedance 2.5: 1080p and video references",
+    items: [
+      "Seedance 2.5 now renders at 1080p as well as 480p and 720p.",
+      "New switch under the brief: Frames or References. Frames works as before: @ref1 starts the clip, @ref2 ends it. References: every image and clip guides the clip, and no frame is fixed.",
+      "You can add a video clip as a reference: upload an MP4, MOV or WEBM, or pick a clip you made. A clip must be at least 640x640 or 854x480.",
+      "The price shown before a run follows OpenRouter's per-token rate. A 4 second square clip at 1080p costs about $1.28. A video reference counts its own seconds too.",
+    ],
+  },
+  {
     id: "2026-11-13-gpt-image-size-and-price",
     date: "13 November 2026",
     title: "GPT Image: the real size and price",
