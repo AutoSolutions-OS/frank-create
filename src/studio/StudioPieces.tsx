@@ -44,7 +44,9 @@ function ReferencePickerCardBase({
       aria-pressed={selected}
       disabled={active}
     >
-      {src ? (
+      {asset.media_type === "video" && full ? (
+        <video src={full} muted playsInline preload="metadata" width={150} height={150} aria-label={asset.title} />
+      ) : src ? (
         <img
           src={src}
           alt={asset.title}
@@ -61,6 +63,11 @@ function ReferencePickerCardBase({
       ) : (
         <span className="reference-picker-card-fallback"><Icon source="photo" tone="inherit" size={18} /></span>
       )}
+      {asset.media_type === "video" ? (
+        <span className="reference-picker-card-video" aria-hidden="true">
+          Video{asset.duration ? ` · ${Math.round(asset.duration)}s` : ""}
+        </span>
+      ) : null}
       <span className="reference-picker-card-title">{asset.title}</span>
       {active ? (
         <span className="reference-picker-card-flag">In use</span>
