@@ -75,8 +75,11 @@ import {
   taggedReferences,
   insertTagAtCaret,
   unknownReferenceTags,
+  planVideoReferences,
+  referenceVideoSeconds,
+  supportsVideoReferences,
 } from "./lib/studio";
-import type { StudioFieldErrors } from "./lib/studio";
+import type { StudioFieldErrors, VideoReferenceMode } from "./lib/studio";
 
 import { StudioRail } from "./components/StudioRail";
 
@@ -139,6 +142,35 @@ import {
 } from "./studio/studioFormat";
 
 const REFERENCE_PICKER_PAGE_SIZE = 9;
+
+/** Video files a reference can be (what Seedance takes: MP4, MOV, WEBM). */
+const REFERENCE_VIDEO_TYPES = new Set(["video/mp4", "video/quicktime", "video/webm"]);
+const REFERENCE_VIDEO_ACCEPT = Array.from(REFERENCE_VIDEO_TYPES).join(",");
+
+/** Clip length in whole seconds from its metadata, or undefined if the browser cannot read it. */
+function readVideoDuration(url: string): Promise<number | undefined> {
+  return new Promise((resolve) => {
+    if (typeof document === "undefined") return resolve(undefined);
+    const video = document.createElement("video");
+    const done = (value: number | undefined) => {
+      video.removeAttribute("src");
+      resolve(value);
+    };
+    const timer = setTimeout(() => done(undefined), 8000);
+    video.preload = "metadata";
+    video.muted = true;
+    video.onloadedmetadata = () => {
+      clearTimeout(timer);
+      const seconds = Number(video.duration);
+      done(Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 10) / 10 : undefined);
+    };
+    video.onerror = () => {
+      clearTimeout(timer);
+      done(undefined);
+    };
+    video.src = url;
+  });
+}
 
 /** Shared empty array so a turn with no outputs keeps a stable prop identity. */
 const NO_ASSETS: Asset[] = [];
@@ -251,6 +283,8 @@ export default function App() {
   // Explicit composer-only attachments. Historical reference assets remain
   // saved for run provenance but are never hydrated into a new run.
   const [activeReferenceIds, setActiveReferenceIds] = useState<string[]>([]);
+  // Seedance 2.5: the dock feeds start/end frames, or references that guide the clip.
+  const [videoReferenceMode, setVideoReferenceMode] = useState<VideoReferenceMode>("frames");
 
   const [maskPainterBusy, setMaskPainterBusy] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -775,9 +809,17 @@ export default function App() {
   }, [selectedModel]);
 
   // Dock order (activeReferenceIds) drives @refN tags and video frame order.
+  // A video clip stays in the dock list but only shows (and is only sent) for a
+  // model that takes video references.
+  const videoReferencesOn = supportsVideoReferences(selectedModel);
+  /** Images always; video clips only for a model that takes video references. */
+  function isReferenceFileType(file: File) {
+    return file.type.startsWith("image/") || (videoReferencesOn && REFERENCE_VIDEO_TYPES.has(file.type));
+  }
   const referenceAssets = activeReferenceIds
     .map((id) => assets.find((asset) => asset.id === id && asset.kind === "reference"))
-    .filter((asset): asset is Asset => Boolean(asset));
+    .filter((asset): asset is Asset => Boolean(asset))
+    .filter((asset) => asset.media_type !== "video" || videoReferencesOn);
 
   // All loaded references are used for the next generation; the only way to
   // exclude one is to remove it from the dock with the X button.
@@ -802,9 +844,18 @@ export default function App() {
   }
 
   // Frames are derived from the reference dock: ref #1 is the first frame and,
-  // when the model accepts an end frame, ref #2 is the last frame.
-  const videoFirstFrame = referenceAssets[0] ?? null;
-  const videoLastFrame = referenceAssets[1] ?? null;
+  // when the model accepts an end frame, ref #2 is the last frame. In
+  // "references" mode (Seedance 2.5) no frame is fixed: every reference guides
+  // the clip, and a video clip in the dock always means that mode.
+  const videoPlan = planVideoReferences(
+    isVideoModel(selectedModel) ? selectedModel : null,
+    referenceAssets,
+    videoReferenceMode
+  );
+  const videoFirstFrame = videoPlan.mode === "frames" ? (referenceAssets[0] ?? null) : null;
+  const videoLastFrame = videoPlan.mode === "frames" ? (referenceAssets[1] ?? null) : null;
+  const videoReferenceSecondsLoaded =
+    videoPlan.mode === "references" ? referenceVideoSeconds(videoPlan.references) : 0;
 
   function clearReferenceDock() {
     setActiveReferenceIds([]);
@@ -1184,8 +1235,10 @@ export default function App() {
     setStatusText(`${asset.title} removed from references.`);
   }
 
-  function splitReferenceLibrary(pool: Asset[]) {
-    const images = pool.filter((asset) => asset.media_type !== "video" && asset.kind !== "mask");
+  function splitReferenceLibrary(pool: Asset[], options: { videos?: boolean } = {}) {
+    const images = pool.filter(
+      (asset) => (asset.media_type !== "video" || options.videos === true) && asset.kind !== "mask"
+    );
     const seen = new Set<string>();
     const merged = images
       .slice()
@@ -1226,8 +1279,9 @@ export default function App() {
     setReferencePickerPage(0);
     setReferencePickerNote(null);
 
+    const libraryOptions = { videos: target === "dock" && videoReferencesOn };
     if (connection !== "online") {
-      splitReferenceLibrary(assets);
+      splitReferenceLibrary(assets, libraryOptions);
       return;
     }
     setReferenceLibraryLoading(true);
@@ -1235,10 +1289,10 @@ export default function App() {
       const { assets: library } = await listAssets({});
       // This session's newest uploads and picks always show, even if the
       // library answer was read before they landed.
-      splitReferenceLibrary([...(library ?? []), ...assets]);
+      splitReferenceLibrary([...(library ?? []), ...assets], libraryOptions);
     } catch (err) {
       console.error("[frank] reference library load failed", err);
-      splitReferenceLibrary(assets);
+      splitReferenceLibrary(assets, libraryOptions);
     } finally {
       setReferenceLibraryLoading(false);
     }
@@ -1295,7 +1349,7 @@ export default function App() {
 
   /** Files dropped straight onto the picker's upload tile from Finder. */
   async function handlePickerFiles(files: File[]) {
-    const images = files.filter((file) => file.type.startsWith("image/"));
+    const images = files.filter((file) => isReferenceFileType(file));
     if (!images.length) return;
     setReferencePickerBusy(true);
     setReferencePickerNote(null);
@@ -1340,12 +1394,19 @@ export default function App() {
     }
 
 
-    setStatusText("Adding reference images...");
+    setStatusText("Adding references...");
     const createdAssets: Asset[] = [];
     const failedUploads: string[] = [];
+    const usable = files.filter((file) => isReferenceFileType(file));
 
-    for (const file of files.slice(0, modelOptions.referenceLimit || files.length)) {
-      const localPreview = await fileToDataUrl(file).catch(() => URL.createObjectURL(file));
+    for (const file of usable.slice(0, modelOptions.referenceLimit || usable.length)) {
+      const isVideo = file.type.startsWith("video/");
+      const mediaType: "image" | "video" = isVideo ? "video" : "image";
+      // A clip can be 50 MB: preview it from memory, never as a data URL.
+      const localPreview = isVideo
+        ? URL.createObjectURL(file)
+        : await fileToDataUrl(file).catch(() => URL.createObjectURL(file));
+      const duration = isVideo ? await readVideoDuration(localPreview) : undefined;
       let remoteUrl: string | undefined;
       let storagePath: string | undefined;
       let uploadedReference: Asset | undefined;
@@ -1360,7 +1421,9 @@ export default function App() {
             title: file.name,
             file_path: path,
             preview_url: url,
-            media_type: "image",
+            media_type: mediaType,
+            mime: file.type || undefined,
+            duration,
             sync_status: "cloud"
           });
           uploadedReference = {
@@ -1370,7 +1433,8 @@ export default function App() {
             remote_url: created.asset.remote_url || url,
             file_path: created.asset.file_path || path,
             kind: "reference",
-            media_type: "image",
+            media_type: mediaType,
+            duration: created.asset.duration ?? duration,
             favorite: created.asset.favorite ?? false,
             sync_status: "cloud"
           };
@@ -1386,7 +1450,8 @@ export default function App() {
         session_id: activeSession.id,
         kind: "reference",
         title: file.name,
-        media_type: "image",
+        media_type: mediaType,
+        duration,
         file_path: storagePath,
         preview_url: localPreview,
         remote_url: remoteUrl,
@@ -1517,7 +1582,7 @@ export default function App() {
   async function handlePromptDrop(event: React.DragEvent<HTMLElement>) {
     event.preventDefault();
     event.stopPropagation();
-    const files = Array.from(event.dataTransfer?.files ?? []).filter((f) => f.type.startsWith("image/"));
+    const files = Array.from(event.dataTransfer?.files ?? []).filter((f) => isReferenceFileType(f));
     if (files.length) {
       await addReferenceFiles(files);
       return;
@@ -2019,7 +2084,7 @@ export default function App() {
     const videoSettings = videoModel ? normalizeVideoSettings(settings, videoModel) : settings;
     const videoProviderPrompt = composeVideoReferencePrompt(
       prompt,
-      selectedReferenceAssets,
+      videoPlan.references,
       sourceAsset,
       lastFrameAsset
     );
@@ -2059,7 +2124,8 @@ export default function App() {
         settings: videoSettings,
         source_asset_id: sourceAsset?.id,
         last_frame_asset_id: lastFrameAsset?.id,
-        reference_asset_ids: selectedReferenceAssets.map((asset) => asset.id),
+        reference_asset_ids: videoPlan.references.map((asset) => asset.id),
+        reference_mode: videoPlan.mode,
         provider_prompt: videoProviderPrompt
       }, { signal: ctrl.signal });
       setTurns((current) => [...current, result.turn]);
@@ -2175,8 +2241,6 @@ export default function App() {
     setGenError(null);
     
     setStatusText(`Running ${modelName(config, modelA.id)} vs ${modelName(config, modelB.id)}...`);
-    const compareFirstFrame = videoFirstFrame;
-    const compareLastFrame = videoLastFrame;
     clearReferenceDock();
     setPrompt("");
 
@@ -2196,8 +2260,11 @@ export default function App() {
       const sideProviderPrompt = composeReferencePrompt(prompt, sideReferenceAssets);
 
       if (compareMedia === "video") {
-        const sourceAsset = compareFirstFrame ?? undefined;
-        const lastFrameAsset = model.supports_last_frame && sourceAsset ? (compareLastFrame ?? undefined) : undefined;
+        // Each side follows its own model: only a model that takes references
+        // gets the "references" mode, the other keeps start/end frames.
+        const sidePlan = planVideoReferences(model, sideReferenceAssets, videoReferenceMode);
+        const sourceAsset = sidePlan.firstFrame;
+        const lastFrameAsset = sidePlan.lastFrame;
         if (model.requires_source_image && !sourceAsset) {
           throw new Error(`${model.short_label ?? model.label} needs a source frame.`);
         }
@@ -2208,8 +2275,9 @@ export default function App() {
           settings: sideSettings,
           source_asset_id: sourceAsset?.id,
           last_frame_asset_id: lastFrameAsset?.id,
-          reference_asset_ids: sideReferenceAssets.map((asset) => asset.id),
-          provider_prompt: composeVideoReferencePrompt(prompt, sideReferenceAssets, sourceAsset, lastFrameAsset)
+          reference_asset_ids: sidePlan.references.map((asset) => asset.id),
+          reference_mode: sidePlan.mode,
+          provider_prompt: composeVideoReferencePrompt(prompt, sidePlan.references, sourceAsset, lastFrameAsset)
         }, { signal: compareCtrl.signal });
         if (startedVideo.status === "running") {
           const final = await pollTurnUntilDone(startedVideo.turn.id, compareCtrl.signal);
@@ -2325,7 +2393,9 @@ export default function App() {
       // all. Hand the provider URL over or the reference arrives broken.
       remote_url: referenceRemoteUrl,
       storage_missing: !!referenceRemoteUrl,
-      media_type: "image",
+      media_type: asset.media_type === "video" ? "video" : "image",
+      mime: asset.media_type === "video" ? "video/mp4" : undefined,
+      duration: asset.duration,
       provider: asset.provider,
       model: asset.model,
       prompt: asset.prompt,
@@ -2829,7 +2899,16 @@ export default function App() {
                           }
                         }}
                       >
-                        {asset.preview_url ? <img src={thumbnailUrl(asset.preview_url, 160, 35, "webp")} alt={asset.title} loading="lazy" /> : <Icon source="photo" tone="inherit" size={15} />}
+                        {asset.media_type === "video" && (asset.preview_url || asset.remote_url) ? (
+                          <video
+                            src={asset.preview_url || asset.remote_url}
+                            muted
+                            playsInline
+                            preload="metadata"
+                            aria-label={`Video reference ${asset.title}`}
+                          />
+                        ) : asset.preview_url ? <img src={thumbnailUrl(asset.preview_url, 160, 35, "webp")} alt={asset.title} loading="lazy" /> : <Icon source="photo" tone="inherit" size={15} />}
+                        {asset.media_type === "video" ? <span className="reference-video-badge" aria-hidden="true">Video</span> : null}
                         <button
                           type="button"
                           className="reference-tag"
@@ -2981,8 +3060,41 @@ export default function App() {
                   const vModel = isVideoModel(selectedModel) ? selectedModel : null;
                   const refs = referenceAssets.length;
                   const endFrames = Boolean(vModel?.supports_last_frame);
+                  const canReference = supportsVideoReferences(vModel);
+                  const hasVideoRef = referenceAssets.some((asset) => asset.media_type === "video");
+                  const referencesMode = videoPlan.mode === "references";
+                  const modeToggle = canReference && refs > 0 ? (
+                    <span className="video-ref-mode" role="group" aria-label="Use references as">
+                      <button
+                        type="button"
+                        className={`video-ref-mode__option${!referencesMode ? " is-on" : ""}`}
+                        aria-pressed={!referencesMode}
+                        disabled={hasVideoRef}
+                        title={hasVideoRef ? "A video clip cannot be a start frame. Remove it to use frames." : "Ref 1 starts the clip, ref 2 ends it."}
+                        onClick={() => setVideoReferenceMode("frames")}
+                      >
+                        Frames
+                      </button>
+                      <button
+                        type="button"
+                        className={`video-ref-mode__option${referencesMode ? " is-on" : ""}`}
+                        aria-pressed={referencesMode}
+                        title="Every reference guides the clip. No frame is fixed."
+                        onClick={() => setVideoReferenceMode("references")}
+                      >
+                        References
+                      </button>
+                    </span>
+                  ) : null;
                   let note: React.ReactNode;
-                  if (endFrames) {
+                  if (referencesMode) {
+                    const last = referenceTagFor(refs - 1);
+                    note = hasVideoRef
+                      ? <>A video clip is loaded, so {refs === 1 ? <strong>@ref1</strong> : <><strong>@ref1</strong> to <strong>{last}</strong></>} guide the clip. No start or end frame.</>
+                      : <>{refs === 1 ? <strong>@ref1</strong> : <><strong>@ref1</strong> to <strong>{last}</strong></>} guide the clip. No start or end frame.</>;
+                  } else if (canReference && refs === 0) {
+                    note = "Add images or video clips as references, or 1 to 2 images as start and end frames.";
+                  } else if (endFrames) {
                     note = refs === 0
                       ? "Add 1 reference to animate from it, or 2 to set a start and end frame."
                       : refs === 1
@@ -2997,8 +3109,9 @@ export default function App() {
                   }
                   return (
                     <p className="video-frame-note">
+                      {modeToggle}
                       {note}
-                      {endFrames && refs > 1 ? (
+                      {endFrames && refs > 1 && !referencesMode ? (
                         <button type="button" className="video-frame-swap" onClick={swapFrameOrder}>
                           Swap
                         </button>
@@ -3208,6 +3321,7 @@ export default function App() {
                   onCompareApprovedChange={setCompareApproved}
                   compareCostLabel={compareCostLabel}
                   videoAllowed={videoAllowed}
+                  videoReferenceSeconds={videoReferenceSecondsLoaded}
 
 
                 />
@@ -3338,13 +3452,15 @@ export default function App() {
               <p>
                 {referencePickerTarget === "upscaler"
                   ? "Pick one image to upscale — newest first. Uploads land here selected."
-                  : `Pick up to ${referencePickerLimit} images — newest first. Uploads land here preselected.`}
+                  : videoReferencesOn
+                    ? `Pick up to ${referencePickerLimit} images or video clips, newest first. Uploads land here preselected.`
+                    : `Pick up to ${referencePickerLimit} images, newest first. Uploads land here preselected.`}
               </p>
             </header>
             <input
               ref={referencePickerInputRef}
               type="file"
-              accept="image/*"
+              accept={referencePickerTarget === "dock" && videoReferencesOn ? `image/*,${REFERENCE_VIDEO_ACCEPT}` : "image/*"}
               multiple
               hidden
               onChange={(event) => { void handlePickerUpload(event); }}
@@ -3372,7 +3488,11 @@ export default function App() {
 
                     <Icon source="arrow-up-tray" tone="inherit" size={22} />
                     <strong>{referencePickerBusy ? "Uploading…" : "Upload from computer"}</strong>
-                    <span>PNG, JPG or WEBP · you can also paste or drop</span>
+                    <span>
+                      {referencePickerTarget === "dock" && videoReferencesOn
+                        ? "PNG, JPG, WEBP, MP4 or MOV · you can also drop"
+                        : "PNG, JPG or WEBP · you can also paste or drop"}
+                    </span>
                   </button>
                   {referencePickerPageItems.length ? (
                     referencePickerPageItems.map((asset) => (

@@ -77,6 +77,11 @@ export interface StudioModel {
   requires_source_image?: boolean;
   /** Video-only: provider schema accepts a last/end frame alongside the first frame. */
   supports_last_frame?: boolean;
+  /**
+   * Video-only: the model takes input_references with images and video clips
+   * (reference-to-video), not only start/end frames.
+   */
+  supports_video_references?: boolean;
   /** Upscale-only: which controls this model's Replicate schema exposes. */
   upscale_controls?: UpscaleControl[];
   /** Upscale-only: enums straight from the provider schema. */
@@ -111,6 +116,8 @@ export interface StudioModel {
   price_flat?: number;
   /** Video-only: exact USD prices keyed as `${duration}@${resolution}`. */
   price_table?: Record<string, number>;
+  /** Video-only: per-token billing (Seedance 2.5), see VideoTokenPricing. */
+  video_token_pricing?: VideoTokenPricing;
   /** Image-only: relative cost band, 1 ($) to 3 ($$$). */
   cost_tier?: 1 | 2 | 3;
   /** Relative price band, drives the Cheapest / Premium badges. */
@@ -240,6 +247,18 @@ export interface StudioTurn {
   updated_at: string;
 }
 
+/**
+ * Per-token video billing. Tokens per output second = width x height x fps / 1024.
+ * Rates are USD per token keyed by resolution, with "default" for the rest.
+ */
+export interface VideoTokenPricing {
+  fps: number;
+  rate: Record<string, number>;
+  rate_with_video_input: Record<string, number>;
+  /** Output pixel size by resolution, then aspect ratio. */
+  sizes: Record<string, Record<string, [number, number]>>;
+}
+
 export interface Asset {
   id: string;
   run_id?: string;
@@ -267,6 +286,8 @@ export interface Asset {
   /** Aspect ratio requested for this asset, e.g. "3:4". */
   aspect_ratio?: string;
   bytes?: number;
+  /** Video-only: clip length in seconds, when known. */
+  duration?: number;
 
   favorite: boolean;
   notes?: string;
@@ -328,6 +349,11 @@ export interface VideoRequest {
   /** Video-only: explicit end frame; only sent for models whose schema accepts it. */
   last_frame_asset_id?: string;
   reference_asset_ids: string[];
+  /**
+   * Video-only: "frames" (ref 1 and 2 are start and end frames) or
+   * "references" (every image and clip guides the clip, Seedance 2.5).
+   */
+  reference_mode?: "frames" | "references";
   /** Prompt actually sent to the provider: reference manifest + expanded @ref tags. */
   provider_prompt?: string;
 }

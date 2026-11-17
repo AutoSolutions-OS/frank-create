@@ -6,6 +6,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { loadPromptAgentConfig, buildPromptAgentSystem, DEFAULT_CONFIG } from "./promptAgent.ts";
 import { removeUnusedFiles } from "./files.ts";
 import { inRequestedOrder, uniqueReferenceUrls } from "./refs.ts";
+import { referenceMediaOf, videoReferenceParts, videoUsageRecord } from "./videoRefs.ts";
+import type { LoadedReference } from "./videoRefs.ts";
 import { closedFanout, ShardErrorNotSaved, updateSnapshot, withShardError } from "./turns.ts";
 import { currentImageModelId, GPT_IMAGE_MODELS, gptImageFields, nearestGptImageAspect, providerUsageRecord } from "./gptImage.ts";
 
@@ -13,7 +15,7 @@ import { currentImageModelId, GPT_IMAGE_MODELS, gptImageFields, nearestGptImageA
 // request, merging to main does not), so /health reports this string and a
 // deploy is confirmed by reading it back. CI fails a PR that changes this
 // function without changing the string: date, then the number of that day's change.
-const SERVER_VERSION = "2026-11-13.1";
+const SERVER_VERSION = "2026-11-17.1";
 
 
 // Identity, entitlements and studio data all live in the AutoSolutions OS
@@ -385,6 +387,7 @@ function rowToAsset(row: any, signedUrl = ""): any {
     height: meta.height,
     aspect_ratio: meta.aspect_ratio ?? undefined,
     bytes: meta.bytes ?? undefined,
+    duration: typeof meta.duration === "number" ? meta.duration : undefined,
 
 
     favorite: !!meta.favorite,
@@ -563,6 +566,8 @@ type VideoCaps = {
   minDuration: number;
   maxDuration: number;
   defaultDuration: number;
+  /** Takes image and video clips as input_references (reference-to-video). */
+  videoReferences?: boolean;
 };
 
 const OPENROUTER_VIDEO_MAP: Record<string, VideoCaps> = {
@@ -590,13 +595,15 @@ const OPENROUTER_VIDEO_MAP: Record<string, VideoCaps> = {
     defaultAspect: "16:9",
     minDuration: 4, maxDuration: 15, defaultDuration: 5,
   },
+  // 1080p since OpenRouter added it (GET /api/v1/videos/models, 17 Nov 2026).
   "seedance-2-5": {
     model: "bytedance/seedance-2.5",
-    resolutions: ["480p", "720p"],
+    resolutions: ["480p", "720p", "1080p"],
     defaultResolution: "720p",
     aspects: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"],
     defaultAspect: "16:9",
     minDuration: 4, maxDuration: 30, defaultDuration: 5,
+    videoReferences: true,
   },
 
 
@@ -677,12 +684,17 @@ async function handleVideo(body: any, userId: string) {
 
   const reqSettings: any = body.settings || {};
   const turnId = crypto.randomUUID();
+  // "references": every image and clip guides the clip (input_references), no
+  // frame is fixed. Only models that take video references get it.
+  const referenceMode: "frames" | "references" =
+    body.reference_mode === "references" && caps.videoReferences ? "references" : "frames";
   const settingsSnapshot: any = {
     kind: "video",
     model: modelId,
     settings: reqSettings,
     preset_key: body.preset_key ?? null,
     reference_asset_ids: body.reference_asset_ids || [],
+    reference_mode: referenceMode,
     status: "running",
   };
   const msgIns = await sb.from("messages").insert({
@@ -701,14 +713,34 @@ async function handleVideo(body: any, userId: string) {
   // the optional end frame (only honoured by schemas that accept one).
   const firstFrameId: string | undefined = body.source_asset_id || undefined;
   const lastFrameId: string | undefined = body.last_frame_asset_id || undefined;
-  const sourceIds: string[] = [
+  const referenceIds: string[] = Array.isArray(body.reference_asset_ids) ? body.reference_asset_ids : [];
+  const loaded = await loadReferenceMedia([
     ...(firstFrameId ? [firstFrameId] : []),
     ...(lastFrameId ? [lastFrameId] : []),
-    ...((body.reference_asset_ids as string[]) || []),
-  ];
-  const sourceUrls = await loadReferenceDataUrls(sourceIds, userId);
-  const firstFrameUrl = firstFrameId ? sourceUrls[0] : undefined;
-  const lastFrameUrl = firstFrameId && lastFrameId ? sourceUrls[1] : undefined;
+    ...referenceIds,
+  ], userId);
+  const byId = new Map(loaded.map((ref) => [ref.id, ref]));
+  const imageUrl = (id?: string) => {
+    const ref = id ? byId.get(id) : undefined;
+    return ref && ref.media === "image" ? ref.url : undefined;
+  };
+  let firstFrameUrl: string | undefined;
+  let lastFrameUrl: string | undefined;
+  let references: LoadedReference[] = [];
+  if (referenceMode === "references") {
+    references = Array.from(new Set(referenceIds))
+      .map((id) => byId.get(id))
+      .filter((ref): ref is LoadedReference => Boolean(ref));
+  } else {
+    // A clip can never be a frame, and a model without video references gets none.
+    firstFrameUrl = imageUrl(firstFrameId);
+    lastFrameUrl = firstFrameUrl ? imageUrl(lastFrameId) : undefined;
+    references = firstFrameUrl
+      ? []
+      : Array.from(new Set(referenceIds))
+        .map((id) => byId.get(id))
+        .filter((ref): ref is LoadedReference => Boolean(ref) && ref!.media === "image");
+  }
 
   const failTurn = (code: string, message: string) => {
     const snapshot = { ...settingsSnapshot, status: "failed", error: message, error_code: code };
@@ -741,7 +773,7 @@ async function handleVideo(body: any, userId: string) {
       duration: clamped.duration,
       firstFrameUrl,
       lastFrameUrl,
-      referenceUrls: firstFrameUrl ? [] : sourceUrls,
+      references,
     });
   } catch (err) {
     const mapped = mapReplicateError(err);
@@ -1274,10 +1306,11 @@ function redactProviderPayload(value: unknown, key = ""): unknown {
       return value.map((item, i) => {
         const url = typeof item === "string"
           ? item
-          : String((item as any)?.image_url?.url ?? (item as any)?.url ?? "");
+          : String((item as any)?.image_url?.url ?? (item as any)?.video_url?.url ?? (item as any)?.url ?? "");
         const label = describeInlineImage(url, i);
         const frameType = typeof item === "object" && item ? (item as any).frame_type : undefined;
-        return frameType ? `${label} (${frameType})` : label;
+        const isVideo = typeof item === "object" && item && (item as any).type === "video_url";
+        return frameType ? `${label} (${frameType})` : isVideo ? `${label} (video)` : label;
       });
     }
     return value.map((item) => redactProviderPayload(item));
@@ -1438,7 +1471,8 @@ type VideoSubmitOpts = {
   duration?: number;
   firstFrameUrl?: string;
   lastFrameUrl?: string;
-  referenceUrls?: string[];
+  /** Reference-to-video: images and clips, in dock order. */
+  references?: LoadedReference[];
   generateAudio?: boolean;
 };
 
@@ -1459,8 +1493,8 @@ async function submitOpenrouterVideo(
     payload.frame_images = frames;
     // frame_images takes precedence over input_references upstream; sending both
     // is pointless, so only attach refs in reference-to-video mode.
-  } else if (opts.referenceUrls?.length) {
-    payload.input_references = imageRefParts(opts.referenceUrls);
+  } else if (opts.references?.length) {
+    payload.input_references = videoReferenceParts(opts.references);
   }
   if (opts.generateAudio === false) payload.generate_audio = false;
 
@@ -1477,7 +1511,7 @@ async function submitOpenrouterVideo(
 // One read of a submitted video job. "pending" means keep polling later.
 async function pollOpenrouterVideoOnce(pollUrl: string): Promise<
   | { state: "pending" }
-  | { state: "completed"; url: string; width?: number; height?: number }
+  | { state: "completed"; url: string; width?: number; height?: number; usage?: Record<string, unknown> }
   | { state: "failed"; message: string }
 > {
   const key = openrouterKey();
@@ -1503,7 +1537,8 @@ async function pollOpenrouterVideoOnce(pollUrl: string): Promise<
     const w = Number(status?.width ?? status?.metadata?.width ?? status?.video?.width);
     const h = Number(status?.height ?? status?.metadata?.height ?? status?.video?.height);
     const size = Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0 ? { width: w, height: h } : {};
-    return { state: "completed", url, ...size };
+    const usage = videoUsageRecord(status);
+    return { state: "completed", url, ...size, ...(usage ? { usage } : {}) };
   }
   if (state === "failed" || state === "canceled" || state === "cancelled") {
     const msg = status?.error?.message || status?.error || "The video model failed to render this clip.";
@@ -1525,8 +1560,27 @@ async function loadReferenceDataUrls(assetIds: string[], userId: string): Promis
   // The database returns rows in its own order. @ref numbers and video frames
   // (first frame, then last) follow the order the app attached them in.
   for (const row of inRequestedOrder(assetIds, data || [])) {
+    // Image runs only: a video clip reference is never sent to an image model.
+    if (referenceMediaOf(row as any) === "video") continue;
     const url = await signed(row.storage_path);
     if (url) out.push(url);
+  }
+  return out;
+}
+
+/** Signed links for the asked ids, in that order, each marked image or video. */
+async function loadReferenceMedia(assetIds: string[], userId: string): Promise<LoadedReference[]> {
+  if (!assetIds.length) return [];
+  const { data } = await supabase().from("assets").select("id,storage_path,metadata_json")
+    .eq("user_id", userId).in("id", Array.from(new Set(assetIds)));
+  const out: LoadedReference[] = [];
+  for (const row of inRequestedOrder(assetIds, data || [])) {
+    const meta = (row as any).metadata_json || {};
+    // An oversized file was never stored: its provider link is the only copy.
+    const url = (row as any).storage_path
+      ? await signed((row as any).storage_path)
+      : (meta.storage_missing && typeof meta.remote_url === "string" ? meta.remote_url : "");
+    if (url) out.push({ id: (row as any).id, url, media: referenceMediaOf(row as any) });
   }
   return out;
 }
@@ -2034,7 +2088,13 @@ async function handleTurnStatus(body: any, userId: string) {
         size: { width: poll.width, height: poll.height },
       });
       if (stored.error) return await failVideo(stored.error.code, stored.error.message);
-      const complete = { ...snapshot, status: "complete", output_asset_ids: [stored.assetId] };
+      // usage.cost is what OpenRouter billed (USD), as provider_usage on image runs.
+      const complete = {
+        ...snapshot,
+        status: "complete",
+        output_asset_ids: [stored.assetId],
+        ...(poll.usage ? { provider_usage: poll.usage } : {}),
+      };
       await sb.from("messages").update({ settings_snapshot_json: complete }).eq("id", turnId);
       return await finishWithRows(complete, "complete");
     }
@@ -2726,10 +2786,13 @@ Deno.serve(async (req) => {
       if (!sessionId || (!storagePath && !storageMissing)) {
         return json({ error: { code: "invalid_reference", message: "Reference needs a session and either an uploaded image path or a provider URL." } }, 400);
       }
+      // A reference is an image, or a video clip (Seedance 2.5 video references).
+      const isVideo = body.media_type === "video";
       const metadata = {
-        title: String(body.title || "Reference image"),
-        media_type: "image",
-        mime: typeof body.mime === "string" ? body.mime : "image/png",
+        title: String(body.title || (isVideo ? "Reference clip" : "Reference image")),
+        media_type: isVideo ? "video" : "image",
+        mime: typeof body.mime === "string" ? body.mime : (isVideo ? "video/mp4" : "image/png"),
+        ...(isVideo && typeof body.duration === "number" && Number.isFinite(body.duration) ? { duration: body.duration } : {}),
         source_asset_id: typeof body.source_asset_id === "string" ? body.source_asset_id : null,
         width: typeof body.width === "number" ? body.width : null,
         height: typeof body.height === "number" ? body.height : null,

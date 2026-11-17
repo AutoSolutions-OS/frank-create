@@ -434,7 +434,22 @@ matched to the system's
   overflow: hidden;
   cursor: pointer;
 }
-.reference-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.reference-thumb img,
+.reference-thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* A video reference: small "Video" mark top-left, the @ref tag stays at the bottom. */
+.reference-video-badge,
+.reference-picker-card-video {
+  position: absolute;
+  inset-block-start: 2px;
+  inset-inline-start: 2px;
+  padding: 0 3px;
+  border-radius: var(--radius-100);
+  background: rgba(10, 10, 10, 0.72);
+  color: #fff;
+  font-size: 9px;
+  line-height: 13px;
+  pointer-events: none;
+}
 .reference-thumb.is-selected,
 .reference-thumb.selected { box-shadow: 0 0 0 2px var(--color-border-brand); }
 .reference-tag {
@@ -537,6 +552,28 @@ matched to the system's
   font-size: var(--type-body-sm-size);
   color: var(--color-text-secondary);
 }
+/* Seedance 2.5: use the dock as start/end frames or as references. */
+.video-ref-mode {
+  display: inline-flex;
+  border-radius: var(--radius-200);
+  box-shadow: 0 0 0 1px var(--color-border);
+  overflow: hidden;
+  flex: none;
+}
+.video-ref-mode__option {
+  border: 0;
+  background: none;
+  font: inherit;
+  padding: 1px var(--space-200);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.video-ref-mode__option.is-on {
+  background: var(--color-bg-fill-secondary);
+  color: var(--color-text);
+  font-weight: 600;
+}
+.video-ref-mode__option:disabled { cursor: not-allowed; opacity: 0.5; }
 .video-frame-swap {
   border: 0;
   background: none;
@@ -1426,7 +1463,8 @@ matched to the system's
   cursor: pointer;
 }
 .reference-picker-card.is-selected { border-color: var(--color-border-brand); box-shadow: 0 0 0 1px var(--color-border-brand); }
-.reference-picker-card img { width: 100%; aspect-ratio: 1; object-fit: cover; }
+.reference-picker-card img,
+.reference-picker-card video { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
 .reference-picker-card-fallback {
   display: flex;
   align-items: center;

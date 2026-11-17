@@ -38,6 +38,8 @@ export interface StudioRailProps {
   compareCostLabel?: string | null;
   /** Video generation is admin-granted per person; off hides every video control. */
   videoAllowed?: boolean;
+  /** Seconds of video in the loaded references (Seedance 2.5 bills them too). */
+  videoReferenceSeconds?: number;
 
 }
 
@@ -100,7 +102,9 @@ export function StudioRail(props: StudioRailProps) {
   const moderation = model?.allowed_moderation ?? [];
   const countCap = isVideo || isCompare ? 1 : maxCountForModel(model);
   const counts = Array.from({ length: Math.min(countCap, 10) }, (_, index) => index + 1);
-  const costEstimate = isVideo ? estimateVideoCost(model, settings) : estimateImageCost(model, settings);
+  const costEstimate = isVideo
+    ? estimateVideoCost(model, settings, { videoInputSeconds: props.videoReferenceSeconds ?? 0 })
+    : estimateImageCost(model, settings);
   const badge = isVideo ? tierBadge(model) : null;
   const pendingAdjustments = compareAdjustments.filter((entry) => entry.items.length);
 

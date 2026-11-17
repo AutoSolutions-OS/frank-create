@@ -295,15 +295,56 @@ const TOKEN_METERED_VIDEO_MODELS = new Set(["seedance-2-5"]);
 
 
 
+/**
+ * USD for one clip on a per-token model (Seedance 2.5), or null when the model
+ * is not billed per token. Tokens = width x height x fps / 1024 per second.
+ * A video reference switches to the "with video input" rate, and its length is
+ * counted next to the output length (ByteDance bills input + output seconds).
+ */
+export function videoTokenCost(
+  model: StudioModel | undefined | null,
+  settings: StudioSettings,
+  videoInputSeconds = 0
+): { usd: number; perSecond: number; width: number; height: number } | null {
+  const pricing = model?.video_token_pricing;
+  if (!model || !pricing) return null;
+  const duration = Number(settings.duration) || model.allowed_durations?.[0] || 5;
+  const resolution = (settings.video_resolution ?? model.allowed_resolutions?.[0] ?? "").toLowerCase();
+  const sizes = pricing.sizes[resolution];
+  if (!sizes) return null;
+  const size = sizes[settings.aspect_ratio] ?? sizes["16:9"] ?? Object.values(sizes)[0];
+  if (!size) return null;
+  const [width, height] = size;
+  const tokensPerSecond = (width * height * pricing.fps) / 1024;
+  const withVideo = videoInputSeconds > 0;
+  const table = withVideo ? pricing.rate_with_video_input : pricing.rate;
+  const rate = table[resolution] ?? table.default ?? 0;
+  const seconds = duration + Math.max(0, videoInputSeconds);
+  return {
+    usd: tokensPerSecond * seconds * rate,
+    perSecond: tokensPerSecond * rate,
+    width,
+    height
+  };
+}
+
 /** Live estimate for the current duration / resolution selection. */
 export function estimateVideoCost(
   model: StudioModel | undefined | null,
-  settings: StudioSettings
+  settings: StudioSettings,
+  options: { videoInputSeconds?: number } = {}
 ): string | null {
   if (!model || !isVideoModel(model)) return null;
   const duration = Number(settings.duration) || model.allowed_durations?.[0] || 5;
   const resolution = settings.video_resolution ?? model.allowed_resolutions?.[0] ?? "";
   const suffix = `${duration}s${resolution ? ` @ ${resolution}` : ""}`;
+
+  const videoInputSeconds = Math.max(0, Number(options.videoInputSeconds) || 0);
+  const tokenCost = videoTokenCost(model, settings, videoInputSeconds);
+  if (tokenCost) {
+    const extra = videoInputSeconds > 0 ? ` · + ${Math.round(videoInputSeconds)}s video ref` : "";
+    return `approx. ~${usd(tokenCost.usd)} · ${suffix}${extra} · ${tokenCost.width}x${tokenCost.height}`;
+  }
 
   if (model.price_table) {
     const exact = model.price_table[`${duration}@${resolution}`];
@@ -732,23 +773,83 @@ export function taggedReferences(
   }));
 }
 
-export function buildReferenceManifest(assets: { title?: string }[]) {
+type ManifestAsset = { title?: string; media_type?: string };
+
+/**
+ * Images and videos are counted apart ("image 1", "video 1"), the way the
+ * models number each kind of reference. A list of images only reads as before.
+ */
+function referenceLabels(assets: ManifestAsset[]): string[] {
+  let images = 0;
+  let videos = 0;
+  return assets.map((asset) =>
+    asset.media_type === "video" ? `reference video ${++videos}` : `reference image ${++images}`
+  );
+}
+
+export function buildReferenceManifest(assets: ManifestAsset[]) {
   const tagged = taggedReferences(assets);
   if (!tagged.length) return "";
+  const labels = referenceLabels(assets);
+  const hasVideo = assets.some((asset) => asset.media_type === "video");
   return [
-    "REFERENCE IMAGE MANIFEST (attached in this exact order):",
-    ...tagged.map((ref) => `Reference image ${ref.index} (${ref.tag}) = ${ref.title}`),
+    hasVideo
+      ? "REFERENCE MANIFEST (images and video clips, attached in this exact order):"
+      : "REFERENCE IMAGE MANIFEST (attached in this exact order):",
+    ...tagged.map((ref, i) => {
+      const label = labels[i] ?? `reference image ${ref.index}`;
+      return `${label.charAt(0).toUpperCase()}${label.slice(1)} (${ref.tag}) = ${ref.title}`;
+    }),
   ].join("\n");
 }
 
 /** Every @refN in the prompt becomes positional language no model can misread. */
-export function expandReferenceTags(prompt: string, assets: { title?: string }[]) {
+export function expandReferenceTags(prompt: string, assets: ManifestAsset[]) {
   const count = assets.length;
+  const labels = referenceLabels(assets);
   return prompt.replace(/@ref(\d+)\b/gi, (match, digits: string) => {
     const n = Number(digits);
     if (!Number.isFinite(n) || n < 1 || n > count) return match;
-    return `reference image ${n} (${referenceTagFor(n - 1)})`;
+    return `${labels[n - 1]} (${referenceTagFor(n - 1)})`;
   });
+}
+
+/** True when the model takes images and video clips as references. */
+export function supportsVideoReferences(model: StudioModel | undefined | null): boolean {
+  return Boolean(model && isVideoModel(model) && model.supports_video_references);
+}
+
+export type VideoReferenceMode = "frames" | "references";
+
+/**
+ * How the reference dock feeds a video run.
+ * - "frames": ref 1 is the first frame, ref 2 the last frame (when the model
+ *   takes one). This is how every video model has worked so far.
+ * - "references": every reference (images and clips) guides the clip, and no
+ *   frame is fixed. A video clip in the dock always means this mode, because a
+ *   clip cannot be a start frame.
+ */
+export function planVideoReferences<T extends { media_type?: string }>(
+  model: StudioModel | undefined | null,
+  references: T[],
+  mode: VideoReferenceMode
+): { mode: VideoReferenceMode; firstFrame?: T; lastFrame?: T; references: T[] } {
+  const canReference = supportsVideoReferences(model);
+  const usable = canReference ? references : references.filter((ref) => ref.media_type !== "video");
+  const hasVideo = usable.some((ref) => ref.media_type === "video");
+  if (canReference && (mode === "references" || hasVideo) && usable.length) {
+    return { mode: "references", references: usable };
+  }
+  const firstFrame = usable[0];
+  const lastFrame = model?.supports_last_frame && firstFrame ? usable[1] : undefined;
+  return { mode: "frames", firstFrame, lastFrame, references: usable };
+}
+
+/** Seconds of video in the references, for the estimate (unknown length counts as 0). */
+export function referenceVideoSeconds(references: { media_type?: string; duration?: number }[]): number {
+  return references
+    .filter((ref) => ref.media_type === "video")
+    .reduce((sum, ref) => sum + (Number.isFinite(Number(ref.duration)) ? Math.max(0, Number(ref.duration)) : 0), 0);
 }
 
 /** Tags used in the prompt that don't map to a loaded reference. */

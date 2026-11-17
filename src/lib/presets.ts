@@ -469,19 +469,35 @@ export const fallbackConfig: FrankConfig = {
       provider_model: "bytedance/seedance-2.5",
       media: "video",
       status: "ready",
-      badge: "720p",
-      max_resolution_label: "720p",
-      description: "ByteDance Seedance 2.5 via OpenRouter — long-form storytelling up to 30s with native audio, first/last frame control and multimodal references. 480p / 720p.",
+      badge: "1080p",
+      max_resolution_label: "1080p",
+      description: "ByteDance Seedance 2.5 via OpenRouter: up to 30s with native audio, 480p / 720p / 1080p. Use references as start/end frames, or as references (images and video clips) that guide the clip.",
       capabilities: { generation: true, edit: false, masked_edit: false, video: true },
       allowed_aspect_ratios: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"],
       allowed_image_sizes: [],
       allowed_durations: [4, 6, 8, 10, 12, 15, 20, 25, 30],
-      allowed_resolutions: ["480p", "720p"],
+      allowed_resolutions: ["480p", "720p", "1080p"],
       supports_last_frame: true,
+      supports_video_references: true,
       reference_image_limit: 9,
       max_count: 1,
       cost_label: "premium",
-      price_per_second_by_resolution: { "480p": 0.12, "720p": 0.27 },
+      // 16:9 rates for the rate label; the estimate itself uses video_token_pricing.
+      price_per_second_by_resolution: { "480p": 0.10, "720p": 0.23, "1080p": 0.57 },
+      // OpenRouter GET /api/v1/videos/models, 17 Nov 2026: USD per video token,
+      // 1080p has its own rate, a video reference switches to the lower
+      // "with video input" rate. Tokens = width x height x 24 fps / 1024 per
+      // second (this gives OpenRouter's own "from $0.1028/second" at 480p).
+      video_token_pricing: {
+        fps: 24,
+        rate: { default: 0.0000107, "1080p": 0.0000117 },
+        rate_with_video_input: { default: 0.0000064, "1080p": 0.000007 },
+        sizes: {
+          "480p": { "16:9": [854, 480], "4:3": [752, 560], "1:1": [640, 640], "3:4": [560, 752], "9:16": [480, 854], "21:9": [992, 432] },
+          "720p": { "16:9": [1280, 720], "4:3": [1112, 834], "1:1": [960, 960], "3:4": [834, 1112], "9:16": [720, 1280], "21:9": [1470, 630] },
+          "1080p": { "16:9": [1920, 1080], "4:3": [1440, 1080], "1:1": [1080, 1080], "3:4": [1080, 1440], "9:16": [1080, 1920], "21:9": [2520, 1080] }
+        }
+      },
       price_tier: "standard",
       configured: true,
       missing_env_vars: []
