@@ -962,7 +962,9 @@ const IMAGE_PRICES: Record<string, Record<string, number>> = {
   "google-nb-pro": { "1K": 0.134, "2K": 0.134, "4K": 0.24 },
   // Nano Banana 2.1: OpenRouter bills image output at half of Nano Banana 2's rate.
   "google-nb-2-1": { "1K": 0.02, "2K": 0.03, "4K": 0.06 },
-  "google-nb-2": { "1K": 0.04, "2K": 0.06, "4K": 0.12 },
+  // Real OpenRouter bills (provider_usage, 16-18 Nov 2026): 1120 / 1680 / 2520
+  // image tokens = $0.0685 at 1K, $0.1014 at 2K, $0.1518 at 4K.
+  "google-nb-2": { "1K": 0.07, "2K": 0.10, "4K": 0.15 },
   // GPT Image 2.6 is priced from OpenAI's token formula: gptImageUnitPrice.
   "seedream-5-pro": { "2K": 0.03, "4K": 0.06 },
   "seedream-4-5": { "2K": 0.03, "4K": 0.06 },
