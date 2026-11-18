@@ -24,3 +24,14 @@ describe("saved items in a brief", () => {
     expect(withElementBlock("a bottle on a sink, like @ref1", [scrub])).toBe("a bottle on a sink, like @ref1");
   });
 });
+
+import { estimateImageCost } from "./studio";
+import { fallbackConfig } from "./presets";
+
+describe("Nano Banana 2 price before a run", () => {
+  const nb2 = fallbackConfig.models.find((m) => m.id === "google-nb-2")!;
+  it("follows the real OpenRouter bills (1K $0.0685, 2K $0.1014, 4K $0.1518)", () => {
+    expect(estimateImageCost(nb2, { aspect_ratio: "9:16", image_size: "1K", count: 2 })).toBe("~$0.14 · 2 images @ 1K · $0.07/image");
+    expect(estimateImageCost(nb2, { aspect_ratio: "1:1", image_size: "4K", count: 1 })).toBe("~$0.15 · 1 image @ 4K · $0.15/image");
+  });
+});
