@@ -1,7 +1,7 @@
 /**
  * The screens, in one place.
  *
- * Four of them (studio, prompt, upscaler, ads) are states inside `App` — they share
+ * Four of them (studio, prompt, upscaler, ads) are states inside `App`: they share
  * its session and asset state, so routing between them is a mode change, not a
  * page change. The rest are their own routes. Both kinds sit in the same tab
  * menu, which is the point: the operator should not be able to tell which is
