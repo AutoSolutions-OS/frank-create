@@ -34,7 +34,10 @@ const api = vi.hoisted(() => ({
   createVideoStoryboard: vi.fn(),
   createReference: vi.fn(),
   deleteAsset: vi.fn(),
-  deleteTurn: vi.fn()
+  deleteTurn: vi.fn(),
+  // Product ad kit: no saved items in these tests.
+  listElements: vi.fn(() => Promise.resolve({ elements: [], modes: {} })),
+  useElement: vi.fn()
 }));
 
 vi.mock("./lib/api", () => api);

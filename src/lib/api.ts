@@ -1,6 +1,12 @@
 import type {
+  AdMode,
   Asset,
   EnhanceSettings,
+  ImportedProduct,
+  StudioElement,
+  Storyboard,
+  StoryboardSettings,
+  StoryboardShot,
   FrankConfig,
   StudioSession,
   StudioTurn,
@@ -256,6 +262,85 @@ export async function uploadReferenceToStorage(
   return { url: signed.signedUrl, path };
 }
 
+
+// ---- Product ad kit --------------------------------------------------------
+
+export async function listElements() {
+  return fetchJson<{ elements: StudioElement[]; modes: Record<string, AdMode> }>("/elements");
+}
+
+export async function createElement(payload: {
+  kind: StudioElement["kind"];
+  name: string;
+  tag?: string;
+  description?: string;
+  image_asset_ids: string[];
+  source_url?: string | null;
+  facts?: Record<string, unknown>;
+}) {
+  return fetchJson<{ element: StudioElement }>("/elements", { method: "POST", body: JSON.stringify(payload) }, { attempts: 1 });
+}
+
+export async function updateElement(id: string, payload: Partial<{
+  kind: StudioElement["kind"];
+  name: string;
+  tag: string;
+  description: string;
+  image_asset_ids: string[];
+}>) {
+  return fetchJson<{ element: StudioElement }>(`/elements/${id}`, { method: "PATCH", body: JSON.stringify(payload) }, { attempts: 1 });
+}
+
+export async function archiveElement(id: string) {
+  return fetchJson<{ ok: boolean }>(`/elements/${id}`, { method: "DELETE" }, { attempts: 1 });
+}
+
+/** Your own dock copies of a saved item's photos, made once and reused. */
+export async function useElement(id: string, sessionId: string) {
+  return fetchJson<{ element: StudioElement; assets: Asset[] }>(`/elements/${id}/use`, {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId })
+  }, { attempts: 1 });
+}
+
+export async function importProduct(url: string, sessionId: string) {
+  return fetchJson<{ product: ImportedProduct; assets: Asset[]; skipped_images: number }>("/product-import", {
+    method: "POST",
+    body: JSON.stringify({ url, session_id: sessionId })
+  }, { attempts: 1 });
+}
+
+export async function listStoryboards() {
+  return fetchJson<{ storyboards: Storyboard[] }>("/storyboards");
+}
+
+export async function planStoryboard(payload: {
+  session_id: string;
+  mode: string;
+  element_ids: string[];
+  note: string;
+  shots: number;
+  seconds: number;
+  aspect_ratio: string;
+  settings: StoryboardSettings;
+  source_url?: string | null;
+}) {
+  return fetchJson<{ storyboard: Storyboard }>("/storyboards/plan", { method: "POST", body: JSON.stringify(payload) }, { attempts: 1 });
+}
+
+export async function updateStoryboard(id: string, payload: Partial<{
+  title: string;
+  brief: string;
+  settings: StoryboardSettings;
+  shots: StoryboardShot[];
+  status: Storyboard["status"];
+}>) {
+  return fetchJson<{ storyboard: Storyboard }>(`/storyboards/${id}`, { method: "PATCH", body: JSON.stringify(payload) }, { attempts: 2 });
+}
+
+export async function joinStoryboard(id: string) {
+  return fetchJson<{ asset: Asset; storyboard: Storyboard }>(`/storyboards/${id}/join`, { method: "POST", body: "{}" }, { attempts: 1 });
+}
 
 async function fetchJson<T>(path: string, init: RequestInit = {}, options: { attempts?: number } = {}) {
   // The edge runtime occasionally answers 503 SUPABASE_EDGE_RUNTIME_SERVICE_DEGRADED
