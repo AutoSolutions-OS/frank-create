@@ -7,6 +7,18 @@ import { loadPromptAgentConfig, buildPromptAgentSystem, DEFAULT_CONFIG } from ".
 import { removeUnusedFiles } from "./files.ts";
 import { inRequestedOrder, uniqueReferenceUrls } from "./refs.ts";
 import { referenceMediaOf, videoReferenceParts, videoUsageRecord } from "./videoRefs.ts";
+import {
+  AD_MODES,
+  ELEMENT_KINDS,
+  isSafeProductUrl,
+  isValidTag,
+  parsePlannerReply,
+  parseProductPage,
+  sanitizeShots,
+  slugTag,
+  storyboardMessages,
+} from "./adkit.ts";
+import { JoinError, joinMp4Clips } from "./joinClips.ts";
 import type { LoadedReference } from "./videoRefs.ts";
 import { closedFanout, ShardErrorNotSaved, updateSnapshot, withShardError } from "./turns.ts";
 import { currentImageModelId, GPT_IMAGE_MODELS, gptImageFields, nearestGptImageAspect, providerUsageRecord } from "./gptImage.ts";
@@ -15,7 +27,7 @@ import { currentImageModelId, GPT_IMAGE_MODELS, gptImageFields, nearestGptImageA
 // request, merging to main does not), so /health reports this string and a
 // deploy is confirmed by reading it back. CI fails a PR that changes this
 // function without changing the string: date, then the number of that day's change.
-const SERVER_VERSION = "2026-11-17.1";
+const SERVER_VERSION = "2026-11-18.1";
 
 
 // Identity, entitlements and studio data all live in the AutoSolutions OS
@@ -2655,6 +2667,505 @@ async function readJson(req: Request): Promise<any> {
   try { return await req.json(); } catch { return {}; }
 }
 
+// ---- Product ad kit routes --------------------------------------------------
+// Elements are shared by a company: reads go through the caller's own client,
+// so RLS (company + Create Studio access) decides what they see. Writes use the
+// service role after that read proved the row is theirs to touch.
+
+const PLANNER_MODELS = ["google/gemini-3.7-flash", "google/gemini-3-flash-preview"];
+const IMPORT_MAX_HTML = 3 * 1024 * 1024;
+const IMPORT_MAX_IMAGE = 15 * 1024 * 1024;
+const IMPORT_MAX_IMAGES = 4;
+
+function callerStudioClient(req: Request) {
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    db: { schema: "studio" },
+    global: { headers: { Authorization: `Bearer ${bearerToken(req)}` } },
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
+
+function adError(code: string, message: string, status = 400) {
+  return json({ error: { code, message } }, status);
+}
+
+/** Elements the caller can see (their company), with signed photo links. */
+async function visibleElements(req: Request, ids?: string[]): Promise<any[]> {
+  let q = callerStudioClient(req).from("elements").select("*").is("archived_at", null);
+  if (ids) q = q.in("id", ids.length ? ids : ["00000000-0000-0000-0000-000000000000"]);
+  const { data, error } = await q.order("kind").order("name");
+  if (error) throw new Error(`elements read failed: ${error.message}`);
+  return data ?? [];
+}
+
+async function elementsWithPhotos(rows: any[], userId: string) {
+  const photoIds = Array.from(new Set(rows.flatMap((r) => r.image_asset_ids ?? [])));
+  const { data: photos } = photoIds.length
+    ? await supabase().from("assets").select("id,storage_path,metadata_json").in("id", photoIds)
+    : { data: [] as any[] };
+  const byId = new Map((photos ?? []).map((p: any) => [p.id, p]));
+  const links = await signedMany((photos ?? []).map((p: any) => String(p.storage_path || "")));
+  return rows.map((r) => ({
+    id: r.id,
+    kind: r.kind,
+    name: r.name,
+    tag: r.tag,
+    description: r.description,
+    source_url: r.source_url,
+    facts: r.facts ?? {},
+    mine: r.user_id === userId,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    images: (r.image_asset_ids ?? [])
+      .map((id: string) => byId.get(id))
+      .filter(Boolean)
+      .map((p: any) => ({ asset_id: p.id, url: links.get(String(p.storage_path || "")) ?? "" })),
+  }));
+}
+
+/**
+ * The element's own photo rows: one per picked picture, owned by the person who
+ * saved the element, pointing at the same stored file. A dock reference can be
+ * deleted later without touching the element.
+ */
+async function makeElementPhotos(userId: string, elementName: string, assetIds: string[]): Promise<string[]> {
+  const ids = Array.from(new Set(assetIds)).slice(0, 6);
+  if (!ids.length) return [];
+  const sb = supabase();
+  const { data: rows } = await sb.from("assets").select("*").eq("user_id", userId).in("id", ids);
+  const out: string[] = [];
+  let n = 0;
+  for (const row of inRequestedOrder(ids, rows ?? [])) {
+    const meta = (row as any).metadata_json || {};
+    if (meta.media_type === "video" || !(row as any).storage_path) continue;
+    if (meta.element_photo === true) {
+      out.push((row as any).id);
+      continue;
+    }
+    n += 1;
+    const { data: created, error } = await sb.from("assets").insert({
+      id: crypto.randomUUID(),
+      user_id: userId,
+      session_id: (row as any).session_id,
+      storage_path: (row as any).storage_path,
+      asset_type: "reference",
+      metadata_json: {
+        title: `${elementName} photo ${n}`,
+        media_type: "image",
+        mime: meta.mime ?? "image/png",
+        width: meta.width ?? null,
+        height: meta.height ?? null,
+        element_photo: true,
+        source_asset_id: (row as any).id,
+      },
+    }).select("id").single();
+    if (error) throw new Error(`photo save failed: ${error.message}`);
+    out.push(created.id);
+  }
+  return out;
+}
+
+function elementInput(body: any) {
+  const kind = String(body.kind || "product");
+  const name = String(body.name || "").trim().slice(0, 80);
+  const tag = String(body.tag || slugTag(name)).trim().toLowerCase();
+  const description = String(body.description || "").trim().slice(0, 2000);
+  const sourceUrl = typeof body.source_url === "string" && /^https?:\/\//i.test(body.source_url) ? body.source_url.slice(0, 2000) : null;
+  const facts = body.facts && typeof body.facts === "object" && !Array.isArray(body.facts) ? body.facts : {};
+  const imageIds = Array.isArray(body.image_asset_ids) ? body.image_asset_ids.filter((x: unknown) => typeof x === "string") : [];
+  return { kind, name, tag, description, sourceUrl, facts, imageIds };
+}
+
+async function fetchLimited(url: string, maxBytes: number, accept: string): Promise<{ bytes: Uint8Array; type: string; finalUrl: string }> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12_000);
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      redirect: "follow",
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; CreateStudio/1.0)", Accept: accept },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!isSafeProductUrl(res.url || url)) throw new Error("redirected to a blocked address");
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error("empty body");
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        ctrl.abort();
+        throw new Error(`over ${Math.round(maxBytes / 1048576)} MB`);
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let at = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, at);
+      at += chunk.byteLength;
+    }
+    return { bytes, type: (res.headers.get("content-type") || "").split(";")[0].toLowerCase(), finalUrl: res.url || url };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function plannerReply(messages: Array<{ role: string; content: string }>) {
+  let lastError = "";
+  for (const model of PLANNER_MODELS) {
+    try {
+      const reply = String(await lovableChat(messages, model) || "").trim();
+      if (reply) return { reply, model };
+    } catch (err) {
+      lastError = errMessage(err).slice(0, 300);
+    }
+  }
+  throw new Error(lastError || "The planner gave no answer.");
+}
+
+function storyboardRow(row: any) {
+  return {
+    id: row.id,
+    session_id: row.session_id,
+    title: row.title,
+    mode: row.mode,
+    brief: row.brief,
+    source_url: row.source_url,
+    element_ids: row.element_ids ?? [],
+    settings: row.settings ?? {},
+    shots: row.shots ?? [],
+    final_asset_id: row.final_asset_id,
+    status: row.status,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+async function handleAdkit(req: Request, path: string, method: string, userId: string): Promise<Response | null> {
+  const sb = supabase();
+
+  if (path === "/elements" && method === "GET") {
+    return json({ elements: await elementsWithPhotos(await visibleElements(req), userId), modes: AD_MODES });
+  }
+
+  if (path === "/elements" && method === "POST") {
+    const body = await readJson(req).catch(() => ({}));
+    const input = elementInput(body);
+    if (!(ELEMENT_KINDS as readonly string[]).includes(input.kind)) return adError("invalid_kind", "Pick product, character, location or style.");
+    if (!input.name) return adError("invalid_name", "Give it a name.");
+    if (!isValidTag(input.tag)) return adError("invalid_tag", "The @tag can use lower-case letters, digits and dashes (up to 40).");
+    const photos = await makeElementPhotos(userId, input.name, input.imageIds);
+    const { data, error } = await sb.from("elements").insert({
+      user_id: userId,
+      kind: input.kind,
+      name: input.name,
+      tag: input.tag,
+      description: input.description,
+      image_asset_ids: photos,
+      source_url: input.sourceUrl,
+      facts: input.facts,
+    }).select("*").single();
+    if (error) {
+      if (/elements_tenant_tag_live|duplicate key/i.test(error.message)) {
+        return adError("tag_taken", `@${input.tag} is already used in your company. Pick another tag.`, 409);
+      }
+      return adError("element_save_failed", error.message);
+    }
+    const [element] = await elementsWithPhotos([data], userId);
+    return json({ element });
+  }
+
+  const elementMatch = path.match(/^\/elements\/([0-9a-f-]{36})(\/use)?$/i);
+  if (elementMatch) {
+    const id = elementMatch[1];
+    const [row] = await visibleElements(req, [id]);
+    if (!row) return adError("not_found", "That product is not in your company.", 404);
+
+    if (elementMatch[2] && method === "POST") {
+      // Each person gets their own dock copy of the photos (same files).
+      const body = await readJson(req).catch(() => ({}));
+      const sessionId = String(body.session_id || "");
+      if (!sessionId) return adError("session_required", "Open a session first.");
+      const photoIds: string[] = row.image_asset_ids ?? [];
+      const { data: photos } = photoIds.length
+        ? await sb.from("assets").select("*").in("id", photoIds)
+        : { data: [] as any[] };
+      const { data: mine } = await sb.from("assets").select("*").eq("user_id", userId).eq("asset_type", "reference")
+        .eq("metadata_json->>source_element_id", id);
+      const out: any[] = [];
+      let n = 0;
+      for (const photo of inRequestedOrder(photoIds, photos ?? [])) {
+        n += 1;
+        const existing = (mine ?? []).find((m: any) => m.metadata_json?.source_element_photo_id === (photo as any).id);
+        if (existing) {
+          out.push(existing);
+          continue;
+        }
+        const { data: created, error } = await sb.from("assets").insert({
+          id: crypto.randomUUID(),
+          user_id: userId,
+          session_id: sessionId,
+          storage_path: (photo as any).storage_path,
+          asset_type: "reference",
+          metadata_json: {
+            title: `${row.name} (@${row.tag}) photo ${n}`,
+            media_type: "image",
+            mime: (photo as any).metadata_json?.mime ?? "image/png",
+            width: (photo as any).metadata_json?.width ?? null,
+            height: (photo as any).metadata_json?.height ?? null,
+            source_element_id: id,
+            source_element_photo_id: (photo as any).id,
+          },
+        }).select("*").single();
+        if (error) return adError("use_failed", error.message);
+        out.push(created);
+      }
+      const links = await signedMany(out.map((r: any) => String(r.storage_path || "")));
+      const [element] = await elementsWithPhotos([row], userId);
+      return json({ element, assets: out.map((r: any) => rowToAsset(r, links.get(String(r.storage_path || "")) ?? "")) });
+    }
+
+    if (!elementMatch[2] && method === "PATCH") {
+      const body = await readJson(req).catch(() => ({}));
+      const patch: Record<string, unknown> = { updated_at: nowIso() };
+      if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim().slice(0, 80);
+      if (typeof body.description === "string") patch.description = body.description.trim().slice(0, 2000);
+      if (typeof body.kind === "string") {
+        if (!(ELEMENT_KINDS as readonly string[]).includes(body.kind)) return adError("invalid_kind", "Pick product, character, location or style.");
+        patch.kind = body.kind;
+      }
+      if (typeof body.tag === "string") {
+        const tag = body.tag.trim().toLowerCase();
+        if (!isValidTag(tag)) return adError("invalid_tag", "The @tag can use lower-case letters, digits and dashes (up to 40).");
+        patch.tag = tag;
+      }
+      if (Array.isArray(body.image_asset_ids)) {
+        const keep = (row.image_asset_ids ?? []).filter((x: string) => body.image_asset_ids.includes(x));
+        const added = body.image_asset_ids.filter((x: string) => !(row.image_asset_ids ?? []).includes(x));
+        const fresh = await makeElementPhotos(userId, String(patch.name ?? row.name), added);
+        patch.image_asset_ids = [...keep, ...fresh].slice(0, 6);
+      }
+      const { data, error } = await sb.from("elements").update(patch).eq("id", id).select("*").single();
+      if (error) {
+        if (/elements_tenant_tag_live|duplicate key/i.test(error.message)) return adError("tag_taken", "That @tag is already used in your company.", 409);
+        return adError("element_save_failed", error.message);
+      }
+      const [element] = await elementsWithPhotos([data], userId);
+      return json({ element });
+    }
+
+    if (!elementMatch[2] && method === "DELETE") {
+      // Archived, not deleted: past runs and storyboards still point at it.
+      const { error } = await sb.from("elements").update({ archived_at: nowIso(), updated_at: nowIso() }).eq("id", id);
+      if (error) return adError("archive_failed", error.message);
+      return json({ ok: true });
+    }
+    return null;
+  }
+
+  if (path === "/product-import" && method === "POST") {
+    const body = await readJson(req).catch(() => ({}));
+    const pageUrl = String(body.url || "").trim();
+    const sessionId = String(body.session_id || "");
+    if (!sessionId) return adError("session_required", "Open a session first.");
+    if (!isSafeProductUrl(pageUrl)) return adError("invalid_url", "Paste a public product page link (https://...).");
+    let page;
+    try {
+      const html = await fetchLimited(pageUrl, IMPORT_MAX_HTML, "text/html,application/xhtml+xml");
+      if (html.type && !/html|xml/.test(html.type)) return adError("not_html", "That link is not a web page.");
+      page = parseProductPage(new TextDecoder().decode(html.bytes), html.finalUrl);
+    } catch (err) {
+      return adError("fetch_failed", `Could not read that page (${errMessage(err).slice(0, 120)}).`, 502);
+    }
+    const assets: any[] = [];
+    const skipped: string[] = [];
+    for (const imageUrl of page.images) {
+      if (assets.length >= IMPORT_MAX_IMAGES) break;
+      if (!isSafeProductUrl(imageUrl)) continue;
+      try {
+        const img = await fetchLimited(imageUrl, IMPORT_MAX_IMAGE, "image/avif,image/webp,image/png,image/jpeg,image/*");
+        if (!/^image\/(png|jpe?g|webp|gif|avif)$/.test(img.type)) {
+          skipped.push(imageUrl);
+          continue;
+        }
+        const ext = img.type.split("/")[1].replace("jpeg", "jpg");
+        const assetId = crypto.randomUUID();
+        const storagePath = `${userId}/${sessionId}/references/${assetId}.${ext}`;
+        const up = await sb.storage.from(BUCKET).upload(storagePath, img.bytes, { contentType: img.type, upsert: false });
+        if (up.error) throw up.error;
+        const dims = imageDimensions(img.bytes, img.type);
+        const { data: row, error } = await sb.from("assets").insert({
+          id: assetId,
+          user_id: userId,
+          session_id: sessionId,
+          storage_path: storagePath,
+          asset_type: "reference",
+          metadata_json: {
+            title: `${page.name || "Product"} photo ${assets.length + 1}`,
+            media_type: "image",
+            mime: img.type,
+            source_url: imageUrl,
+            ...(dims ? { width: dims.width, height: dims.height } : {}),
+          },
+        }).select("*").single();
+        if (error) throw error;
+        assets.push(rowToAsset(row, await signed(storagePath)));
+      } catch {
+        skipped.push(imageUrl);
+      }
+    }
+    return json({
+      product: {
+        name: page.name,
+        description: page.description,
+        brand: page.brand,
+        price: page.price,
+        currency: page.currency,
+        url: page.url,
+        suggested_tag: slugTag(page.name || "product"),
+      },
+      assets,
+      skipped_images: skipped.length,
+    });
+  }
+
+  if (path === "/storyboards" && method === "GET") {
+    const { data, error } = await sb.from("storyboards").select("*").eq("user_id", userId)
+      .order("updated_at", { ascending: false }).limit(20);
+    if (error) return adError("storyboards_read_failed", error.message);
+    return json({ storyboards: (data ?? []).map(storyboardRow) });
+  }
+
+  if (path === "/storyboards/plan" && method === "POST") {
+    const body = await readJson(req).catch(() => ({}));
+    const sessionId = String(body.session_id || "");
+    if (!sessionId) return adError("session_required", "Open a session first.");
+    const mode = AD_MODES[String(body.mode)] ? String(body.mode) : "hero";
+    const shots = Math.min(6, Math.max(2, Math.round(Number(body.shots) || 4)));
+    const seconds = Math.min(15, Math.max(4, Math.round(Number(body.seconds) || 5)));
+    const aspectRatio = typeof body.aspect_ratio === "string" ? body.aspect_ratio.slice(0, 8) : "16:9";
+    const elementIds: string[] = Array.isArray(body.element_ids) ? body.element_ids.filter((x: unknown) => typeof x === "string").slice(0, 6) : [];
+    const elements = elementIds.length ? await visibleElements(req, elementIds) : [];
+    const note = String(body.note || "").slice(0, 2000);
+    let planned;
+    try {
+      const { reply } = await plannerReply(storyboardMessages({
+        mode, note, shots, seconds, aspectRatio,
+        elements: elements.map((el) => ({ tag: el.tag, kind: el.kind, name: el.name, description: el.description, facts: el.facts })),
+      }));
+      planned = parsePlannerReply(reply, shots);
+    } catch (err) {
+      return adError("planner_failed", `The planner did not answer: ${errMessage(err).slice(0, 200)}`, 502);
+    }
+    if (!planned) return adError("planner_unreadable", "The planner's answer could not be read. Try again.", 502);
+    const { data, error } = await sb.from("storyboards").insert({
+      user_id: userId,
+      session_id: sessionId,
+      title: planned.title,
+      mode,
+      brief: planned.brief,
+      source_url: typeof body.source_url === "string" && /^https?:\/\//i.test(body.source_url) ? body.source_url.slice(0, 2000) : null,
+      element_ids: elements.map((el) => el.id),
+      settings: body.settings && typeof body.settings === "object" ? body.settings : {},
+      shots: planned.shots.map((shot) => ({ id: crypto.randomUUID(), ...shot, still_asset_id: null, clip_message_id: null, clip_asset_id: null, status: "planned" })),
+      status: "draft",
+    }).select("*").single();
+    if (error) return adError("storyboard_save_failed", error.message);
+    return json({ storyboard: storyboardRow(data) });
+  }
+
+  const boardMatch = path.match(/^\/storyboards\/([0-9a-f-]{36})(\/join)?$/i);
+  if (boardMatch) {
+    const id = boardMatch[1];
+    const { data: row } = await sb.from("storyboards").select("*").eq("user_id", userId).eq("id", id).maybeSingle();
+    if (!row) return adError("not_found", "Storyboard not found.", 404);
+
+    if (!boardMatch[2] && method === "PATCH") {
+      const body = await readJson(req).catch(() => ({}));
+      const patch: Record<string, unknown> = { updated_at: nowIso() };
+      if (typeof body.title === "string") patch.title = body.title.trim().slice(0, 120);
+      if (typeof body.brief === "string") patch.brief = body.brief.slice(0, 8000);
+      if (body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)) patch.settings = body.settings;
+      if (typeof body.status === "string" && ["draft", "stills", "clips", "done"].includes(body.status)) patch.status = body.status;
+      if (body.shots !== undefined) {
+        const shots = sanitizeShots(body.shots);
+        if (!shots) return adError("invalid_shots", "A storyboard has 1 to 8 shots.");
+        patch.shots = shots;
+      }
+      const { data, error } = await sb.from("storyboards").update(patch).eq("user_id", userId).eq("id", id).select("*").single();
+      if (error) return adError("storyboard_save_failed", error.message);
+      return json({ storyboard: storyboardRow(data) });
+    }
+
+    if (boardMatch[2] && method === "POST") {
+      const clipIds: string[] = (row.shots ?? []).map((s: any) => s?.clip_asset_id).filter((x: unknown) => typeof x === "string");
+      if (clipIds.length < 2) return adError("too_few_clips", "Make at least two clips first.");
+      const { data: clipRows } = await sb.from("assets").select("*").eq("user_id", userId).in("id", clipIds);
+      const ordered = inRequestedOrder(clipIds, clipRows ?? []);
+      if (ordered.length !== clipIds.length) return adError("clip_missing", "A clip of this storyboard was deleted. Make it again.");
+      const parts: Uint8Array[] = [];
+      for (const clip of ordered) {
+        const meta = (clip as any).metadata_json || {};
+        const link = (clip as any).storage_path ? await signed((clip as any).storage_path) : String(meta.remote_url || "");
+        if (!link) return adError("clip_missing", "A clip has no stored file.");
+        const res = await fetch(link);
+        if (!res.ok) return adError("clip_download_failed", `Could not read a clip (${res.status}).`, 502);
+        parts.push(new Uint8Array(await res.arrayBuffer()));
+      }
+      let film;
+      try {
+        film = await joinMp4Clips(parts);
+      } catch (err) {
+        if (err instanceof JoinError) return adError(err.code, err.message);
+        return adError("join_failed", `The clips could not be joined: ${errMessage(err).slice(0, 200)}`, 500);
+      }
+      const assetId = crypto.randomUUID();
+      const sessionId = row.session_id || (ordered[0] as any).session_id;
+      const storagePath = `${sessionId}/${assetId}.mp4`;
+      let stored: StoredResult;
+      try {
+        stored = await storeOrFallback({ storagePath, bytes: film.bytes, mime: "video/mp4" });
+      } catch (err) {
+        return adError("storage_failed", errMessage(err).slice(0, 200), 500);
+      }
+      const { data: asset, error } = await sb.from("assets").insert({
+        id: assetId,
+        user_id: userId,
+        session_id: sessionId,
+        storage_path: stored.stored ? storagePath : "",
+        asset_type: "generated",
+        prompt_snapshot: row.brief || row.title,
+        model_key: (ordered[0] as any).model_key,
+        metadata_json: {
+          media_type: "video",
+          mime: "video/mp4",
+          title: `${row.title || "Product ad"} (film)`,
+          aspect_ratio: row.settings?.aspect_ratio ?? null,
+          duration: Math.round(film.duration * 10) / 10,
+          width: film.width,
+          height: film.height,
+          bytes: film.bytes.byteLength,
+          audio: film.audio,
+          storyboard_id: id,
+          parts: clipIds,
+          provider: "studio-join",
+          ...stored.meta,
+        },
+      }).select("*").single();
+      if (error) return adError("film_save_failed", error.message);
+      const { data: updated } = await sb.from("storyboards").update({ final_asset_id: assetId, status: "done", updated_at: nowIso() })
+        .eq("user_id", userId).eq("id", id).select("*").single();
+      return json({ asset: rowToAsset(asset, await signed(storagePath)), storyboard: storyboardRow(updated ?? row) });
+    }
+    return null;
+  }
+
+  return null;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -2767,7 +3278,11 @@ Deno.serve(async (req) => {
         return q.order("created_at", { ascending: true }).order("id", { ascending: true });
       });
       const links = await signedMany(rows.map((r: any) => String(r.storage_path || "")));
-      const items = rows.map((r: any) => rowToAsset(r, links.get(String(r.storage_path || "")) ?? ""));
+      // A saved product's own photos stay out of the library: people use them
+      // through the product, which gives each person their own copy.
+      const items = rows
+        .filter((r: any) => r?.metadata_json?.element_photo !== true)
+        .map((r: any) => rowToAsset(r, links.get(String(r.storage_path || "")) ?? ""));
       return json({ assets: items });
     }
 
@@ -2812,6 +3327,13 @@ Deno.serve(async (req) => {
       }).select().single();
       if (error) return json({ error: { code: "reference_create_failed", message: error.message } }, 400);
       return json({ asset: rowToAsset(data, await signed(data.storage_path)) });
+    }
+
+
+    // ---- Product ad kit: saved products (elements), product import, storyboards
+    if (path.startsWith("/elements") || path === "/product-import" || path.startsWith("/storyboards")) {
+      const adkit = await handleAdkit(req, path, method, userId);
+      if (adkit) return adkit;
     }
 
     const turnDelMatch = path.match(/^\/turns\/([^/]+)$/);

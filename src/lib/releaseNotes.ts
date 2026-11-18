@@ -15,6 +15,17 @@ export interface ReleaseNote {
  */
 export const RELEASES: ReleaseNote[] = [
   {
+    id: "2026-11-18-product-ad-kit",
+    date: "18 November 2026",
+    title: "Product ad kit: saved products and the Ad builder",
+    items: [
+      "Products: save a product, character, location or style once, with its photos and what must stay true. Paste a product page link to fill it in. Everyone in your company can use it.",
+      "Type its @tag in any brief (or press Use): its photos go in as references and its description goes to the model.",
+      "Ad builder (new tab): pick a product and an ad style. It plans the shots, makes a still per shot, turns each still into a clip, and joins the clips into one film.",
+      "Make the clips at 480p first to try the cut, then make them again at 1080p. The price shows before each step.",
+    ],
+  },
+  {
     id: "2026-11-17-seedance-2-5-1080p-references",
     date: "17 November 2026",
     title: "Seedance 2.5: 1080p and video references",

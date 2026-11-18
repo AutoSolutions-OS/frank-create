@@ -37,6 +37,8 @@ import {
   listAssets,
   listSessions,
   listTurns,
+  listElements,
+  useElement,
   updateSession
 } from "./lib/api";
 
@@ -79,6 +81,7 @@ import {
   referenceVideoSeconds,
   supportsVideoReferences,
   videoReferenceSizeError,
+  withElementBlock,
 } from "./lib/studio";
 import type { StudioFieldErrors, VideoReferenceMode } from "./lib/studio";
 
@@ -89,10 +92,14 @@ const PromptGenerator = lazy(() =>
   import("./components/PromptGenerator").then((m) => ({ default: m.PromptGenerator }))
 );
 const Enhancer = lazy(() => import("./components/Enhancer"));
+const AdBuilder = lazy(() => import("./adkit/AdBuilder").then((m) => ({ default: m.AdBuilder })));
+const ElementsDialog = lazy(() => import("./adkit/ElementsDialog").then((m) => ({ default: m.ElementsDialog })));
 
 import type {
+  AdMode,
   Asset,
   FrankConfig,
+  StudioElement,
   FrankTask,
   StudioModel,
   StudioSession,
@@ -230,6 +237,24 @@ export default function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
   const [studioMode, setStudioMode] = useState<InAppScreen>(() => modeFromUrl());
+  // Product ad kit: the company's saved products and characters (@tags).
+  const [elements, setElements] = useState<StudioElement[]>([]);
+  const [adModes, setAdModes] = useState<Record<string, AdMode>>({});
+  const [elementsOpen, setElementsOpen] = useState(false);
+  useEffect(() => {
+    if (connection !== "online") return;
+    let live = true;
+    listElements()
+      .then((result) => {
+        if (!live) return;
+        setElements(result.elements);
+        setAdModes(result.modes);
+      })
+      .catch(() => undefined); // Before the core tables exist the kit stays empty.
+    return () => {
+      live = false;
+    };
+  }, [connection]);
   const [settings, setSettings] = useState<StudioSettings>(defaultStudioSettings(fallbackConfig.models[0]));
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [lightboxAsset, setLightboxAsset] = useState<Asset | null>(null);
@@ -1045,6 +1070,30 @@ export default function App() {
     setStatusText("Enhancer is open.");
   }
 
+  function showAdBuilder() {
+    setStudioMode("ads");
+    setSettingsRailOpen(false);
+    setStatusText("Ad builder is open.");
+  }
+
+  /** A saved item into the brief: its photos into the dock, its @tag at the caret. */
+  async function useSavedElement(element: StudioElement) {
+    if (!activeSession || connection !== "online") {
+      setStatusText("The studio is still connecting. Try again in a moment.");
+      return;
+    }
+    try {
+      const { assets: copies } = await useElement(element.id, activeSession.id);
+      setAssets((current) => mergeAssets(current, copies));
+      setActiveReferenceIds((current) => Array.from(new Set([...current, ...copies.map((asset) => asset.id)])));
+      setElementsOpen(false);
+      if (studioMode === "studio") insertReferenceTag(`@${element.tag}`);
+      setStatusText(`@${element.tag} is in the brief, with ${copies.length} photo${copies.length === 1 ? "" : "s"} as references.`);
+    } catch (err) {
+      setStatusText(err instanceof Error ? err.message : "Could not use that item.");
+    }
+  }
+
   function showPromptGenerator() {
     setStudioMode("prompt");
     setSettingsRailOpen(false);
@@ -1789,7 +1838,7 @@ export default function App() {
       setStatusText(`${unknownTags.join(", ")} ${unknownTags.length === 1 ? "does" : "do"} not match a loaded reference. Remove the tag or add the image.`);
       return null;
     }
-    const providerPrompt = composeReferencePrompt(promptText, generationReferenceAssets);
+    const providerPrompt = composeReferencePrompt(withElementBlock(promptText, elements), generationReferenceAssets);
     if (selectedReferenceAssets.length && !generationReferenceUrls.length) {
       setStatusText("Reference images are still uploading. Try again in a moment.");
       return null;
@@ -2125,7 +2174,7 @@ export default function App() {
 
     const videoSettings = videoModel ? normalizeVideoSettings(settings, videoModel) : settings;
     const videoProviderPrompt = composeVideoReferencePrompt(
-      prompt,
+      withElementBlock(prompt, elements),
       videoPlan.references,
       sourceAsset,
       lastFrameAsset
@@ -2299,7 +2348,7 @@ export default function App() {
       };
       const sideReferenceAssets = compareReferenceAssets.slice(0, resolved.referenceLimit);
       const sideReferenceUrls = generationReferenceUrls.slice(0, resolved.referenceLimit);
-      const sideProviderPrompt = composeReferencePrompt(prompt, sideReferenceAssets);
+      const sideProviderPrompt = composeReferencePrompt(withElementBlock(prompt, elements), sideReferenceAssets);
 
       if (compareMedia === "video") {
         // Each side follows its own model: only a model that takes references
@@ -2319,7 +2368,7 @@ export default function App() {
           last_frame_asset_id: lastFrameAsset?.id,
           reference_asset_ids: sidePlan.references.map((asset) => asset.id),
           reference_mode: sidePlan.mode,
-          provider_prompt: composeVideoReferencePrompt(prompt, sidePlan.references, sourceAsset, lastFrameAsset)
+          provider_prompt: composeVideoReferencePrompt(withElementBlock(prompt, elements), sidePlan.references, sourceAsset, lastFrameAsset)
         }, { signal: compareCtrl.signal });
         if (startedVideo.status === "running") {
           const final = await pollTurnUntilDone(startedVideo.turn.id, compareCtrl.signal);
@@ -2616,6 +2665,7 @@ export default function App() {
       case "studio": return showImageStudio();
       case "prompt": return showPromptGenerator();
       case "upscaler": return showEnhancer();
+      case "ads": return showAdBuilder();
       default: return navigate(screen);
     }
   }
@@ -2733,6 +2783,22 @@ export default function App() {
         />
         </Suspense>
 
+      ) : studioMode === "ads" ? (
+        <Suspense fallback={<div className="screen-loading"><Spinner size="small" /></div>}>
+        <AdBuilder
+          models={config.models}
+          sessionId={activeSession?.id ?? null}
+          connection={connection}
+          elements={elements}
+          modes={adModes}
+          assets={assets}
+          onOpenElements={() => setElementsOpen(true)}
+          onAssetsCreated={(created) => setAssets((current) => mergeAssets(current, created))}
+          onStatus={setStatusText}
+          onExpandAsset={(asset) => setLightboxAsset(asset)}
+          onDownloadAsset={(asset) => void downloadAssetFile(asset)}
+        />
+        </Suspense>
       ) : studioMode === "prompt" ? (
         <Suspense fallback={<div className="screen-loading"><Spinner size="small" /></div>}>
         <PromptGenerator
@@ -2920,6 +2986,16 @@ export default function App() {
                         {referenceAssets.length}
                       </span>
                     ) : null}
+                  </button>
+                  <button
+                    type="button"
+                    className="upload-button products-button"
+                    onClick={() => setElementsOpen(true)}
+                    title="Saved products and characters: use one with its @tag"
+                  >
+                    <Icon source="tag" tone="inherit" size={16} />
+                    Products
+                    {elements.length ? <span className="reference-count-badge">{elements.length}</span> : null}
                   </button>
                   <div className="reference-dock" aria-label="Reference images">
 
@@ -3475,6 +3551,22 @@ export default function App() {
 
           </div>
         </div>
+      ) : null}
+
+      {elementsOpen ? (
+        <Suspense fallback={null}>
+          <ElementsDialog
+            open={elementsOpen}
+            onClose={() => setElementsOpen(false)}
+            elements={elements}
+            onElementsChange={setElements}
+            sessionId={activeSession?.id ?? null}
+            dockReferences={referenceAssets}
+            onAssetsCreated={(created) => setAssets((current) => mergeAssets(current, created))}
+            onUse={(element) => void useSavedElement(element)}
+            onStatus={setStatusText}
+          />
+        </Suspense>
       ) : null}
 
       {referencePickerOpen ? createPortal(

@@ -359,3 +359,70 @@ export interface VideoRequest {
   /** Prompt actually sent to the provider: reference manifest + expanded @ref tags. */
   provider_prompt?: string;
 }
+
+
+/** A saved product, character, location or style, called with @tag in a brief. Shared by the company. */
+export interface StudioElement {
+  id: string;
+  kind: "product" | "character" | "location" | "style";
+  name: string;
+  tag: string;
+  description: string;
+  source_url?: string | null;
+  facts?: Record<string, unknown>;
+  /** True when the signed-in person saved it. */
+  mine: boolean;
+  images: { asset_id: string; url: string }[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface AdMode {
+  label: string;
+  guide: string;
+}
+
+export interface StoryboardShot {
+  id: string;
+  title: string;
+  image_prompt: string;
+  motion_prompt: string;
+  still_asset_id?: string | null;
+  clip_message_id?: string | null;
+  clip_asset_id?: string | null;
+  status?: "planned" | "still_running" | "still_done" | "clip_running" | "clip_done" | "failed";
+}
+
+export interface StoryboardSettings {
+  still_model?: string;
+  video_model?: string;
+  aspect_ratio?: string;
+  video_resolution?: string;
+  seconds?: number;
+}
+
+export interface Storyboard {
+  id: string;
+  session_id: string | null;
+  title: string;
+  mode: string;
+  brief: string;
+  source_url?: string | null;
+  element_ids: string[];
+  settings: StoryboardSettings;
+  shots: StoryboardShot[];
+  final_asset_id?: string | null;
+  status: "draft" | "stills" | "clips" | "done";
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ImportedProduct {
+  name: string;
+  description: string;
+  brand: string;
+  price: string;
+  currency: string;
+  url: string;
+  suggested_tag: string;
+}

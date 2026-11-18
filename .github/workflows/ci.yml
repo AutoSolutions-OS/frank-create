@@ -58,13 +58,23 @@ jobs:
         with:
           deno-version: v2.x
 
+      # The repo's package.json makes Deno read node_modules (bring your own
+      # node_modules). mediabunny (joinClips.ts) imports node:fs/promises, so
+      # the check needs @types/node from there, as on a dev machine.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
       # The edge function is outside tsc and vitest, so a type error would
       # only show up after a deploy. One retry: the remote import can flake.
       - name: Type-check the edge function
         run: deno check supabase/functions/frank-api/index.ts || (sleep 15 && deno check supabase/functions/frank-api/index.ts)
 
       - name: Edge function tests
-        run: deno test supabase/functions/frank-api/
+        run: deno test --allow-read=supabase/functions/frank-api/testdata supabase/functions/frank-api/
 
       # Merging does not deploy frank-api. /health reports SERVER_VERSION, so a
       # change must carry a new one, or nobody can tell whether it is live.

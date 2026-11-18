@@ -1,7 +1,7 @@
 /**
  * The screens, in one place.
  *
- * Three of them (studio, prompt, upscaler) are states inside `App` — they share
+ * Four of them (studio, prompt, upscaler, ads) are states inside `App`: they share
  * its session and asset state, so routing between them is a mode change, not a
  * page change. The rest are their own routes. Both kinds sit in the same tab
  * menu, which is the point: the operator should not be able to tell which is
@@ -15,12 +15,13 @@ export type Screen =
   | "studio"
   | "prompt"
   | "upscaler"
+  | "ads"
   | "admin"
   | "health"
   | "settings";
 
 /** The screens that live inside `App` and switch by mode rather than by route. */
-export const IN_APP_SCREENS = ["studio", "prompt", "upscaler"] as const;
+export const IN_APP_SCREENS = ["studio", "prompt", "upscaler", "ads"] as const;
 export type InAppScreen = (typeof IN_APP_SCREENS)[number];
 
 export function isInApp(screen: Screen): screen is InAppScreen {
@@ -46,6 +47,7 @@ const PLACES: Record<Screen, string> = {
   studio: "/?mode=studio",
   prompt: "/?mode=prompt",
   upscaler: "/?mode=upscaler",
+  ads: "/?mode=ads",
   admin: "/admin",
   settings: "/settings",
   health: "/health",
@@ -103,6 +105,7 @@ export const STUDIO_TABS: OsTab[] = [
   { id: "studio", label: "Studio", icon: "mkt-image-generator", path: PLACES.studio },
   { id: "prompt", label: "Prompt generator", icon: "agent", path: PLACES.prompt },
   { id: "upscaler", label: "Upscaler", icon: "ops-demand-plan", path: PLACES.upscaler },
+  { id: "ads", label: "Ad builder", icon: "mkt-paid-media", path: PLACES.ads },
   { id: "admin", label: "Admin portal", icon: "fin-approvals", path: PLACES.admin },
   osSettingsTab(PLACES.settings),
 ];
@@ -168,7 +171,7 @@ export function resolveScreen(): { screen: Screen | "oauth" | "notfound" } {
 }
 
 
-/** Which of the three in-App screens the URL asks for. */
+/** Which of the in-App screens the URL asks for. */
 export function modeFromUrl(): InAppScreen {
   if (typeof window === "undefined") return "studio";
   const hashQuery = window.location.hash.split("?")[1] || "";

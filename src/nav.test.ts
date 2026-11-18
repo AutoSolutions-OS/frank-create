@@ -7,7 +7,7 @@ import { NAV_ICONS } from "autosolutions-design-system/components/media/navIcons
 import { STUDIO_TABS, STUDIO_TOOLS, frameLocation, linkFor, navigate, placeFor, resolveScreen, screenForPlace } from "./nav";
 import type { Screen } from "./nav";
 
-const SCREENS: Screen[] = ["studio", "prompt", "upscaler", "admin", "settings", "health"];
+const SCREENS: Screen[] = ["studio", "prompt", "upscaler", "ads", "admin", "settings", "health"];
 
 const studioFrame = () => osFrame({ appKey: "frank_create", tools: STUDIO_TOOLS });
 
@@ -19,9 +19,9 @@ describe("the studio in the workspace frame", () => {
   });
 
   it("keeps the old menu's screens and order, the app's own Settings last", () => {
-    expect(STUDIO_TABS.map((tab) => tab.id)).toEqual(["studio", "prompt", "upscaler", "admin", "settings"]);
+    expect(STUDIO_TABS.map((tab) => tab.id)).toEqual(["studio", "prompt", "upscaler", "ads", "admin", "settings"]);
     expect(STUDIO_TABS.map((tab) => tab.label)).toEqual([
-      "Studio", "Prompt generator", "Upscaler", "Admin portal", "Settings",
+      "Studio", "Prompt generator", "Upscaler", "Ad builder", "Admin portal", "Settings",
     ]);
     // os 0.3.2: the rail's settings glyph, on the settings page's place.
     expect(STUDIO_TABS[STUDIO_TABS.length - 1]).toMatchObject({ icon: "settings", path: placeFor("settings") });
@@ -44,6 +44,7 @@ describe("the studio in the workspace frame", () => {
     expect(at("studio")).toEqual({ fn: "marketing", item: "image-generator", tab: "studio" });
     expect(at("prompt")).toEqual({ fn: "marketing", item: "image-generator", tab: "prompt" });
     expect(at("upscaler")).toEqual({ fn: "marketing", item: "image-generator", tab: "upscaler" });
+    expect(at("ads")).toEqual({ fn: "marketing", item: "image-generator", tab: "ads" });
     expect(at("admin")).toEqual({ fn: "marketing", item: "image-generator", tab: "admin" });
     expect(at("settings")).toEqual({ fn: "marketing", item: "image-generator", tab: "settings" });
     // Health is no tab's place: Marketing, with nothing marked as current.
@@ -145,7 +146,7 @@ describe("the hash router the frame's clicks go through", () => {
 
   it("writes every tab and the tool's row as a link to its screen's address", () => {
     expect(STUDIO_TABS.map((tab) => linkFor(tab.path ?? ""))).toEqual([
-      "/#/", "/#/?mode=prompt", "/#/?mode=upscaler", "/#/admin", "/#/settings",
+      "/#/", "/#/?mode=prompt", "/#/?mode=upscaler", "/#/?mode=ads", "/#/admin", "/#/settings",
     ]);
     expect(linkFor(STUDIO_TOOLS[0].path ?? "")).toBe("/#/");
     expect(linkFor("/somewhere-else")).toBeNull();

@@ -1062,3 +1062,40 @@ export function estimateImageCost(
   const total = unit * count;
   return `~${usd(total)} · ${count} image${count > 1 ? "s" : ""}${size}${qualityLabel} · ${usd(unit)}/image`;
 }
+
+/** Saved items (products, characters...) named with @tag in a brief, in the order they first appear. */
+export function elementsInPrompt<T extends { tag: string }>(prompt: string, elements: T[]): T[] {
+  const byTag = new Map(elements.map((el) => [el.tag.toLowerCase(), el]));
+  const found: T[] = [];
+  for (const match of prompt.matchAll(/(^|[^a-z0-9_])@([a-z0-9][a-z0-9-]{0,39})/gi)) {
+    const el = byTag.get(match[2].toLowerCase().replace(/-+$/, ""));
+    if (el && !found.includes(el)) found.push(el);
+  }
+  return found;
+}
+
+const KIND_WORD: Record<string, string> = {
+  product: "Product",
+  character: "Character",
+  location: "Location",
+  style: "Style"
+};
+
+/**
+ * The brief as the model reads it: a short block naming each saved item used
+ * (kind, name, description), then the brief itself. A brief with no saved item
+ * comes back unchanged.
+ */
+export function withElementBlock(
+  prompt: string,
+  elements: { tag: string; kind: string; name: string; description?: string }[]
+): string {
+  const used = elementsInPrompt(prompt, elements);
+  if (!used.length) return prompt;
+  const lines = used.map((el) => {
+    const what = `${KIND_WORD[el.kind] ?? "Item"} "${el.name}"`;
+    const desc = (el.description || "").replace(/\s+/g, " ").trim().slice(0, 600).replace(/[.\s]+$/, "");
+    return `@${el.tag} = ${what}${desc ? `: ${desc}` : ""}. Its reference photos show exactly how it looks; keep its shape, colours and label unchanged.`;
+  });
+  return ["SAVED ITEMS IN THIS BRIEF:", ...lines, "", prompt].join("\n");
+}
