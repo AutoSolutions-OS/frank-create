@@ -5,7 +5,6 @@ import {
   Banner,
   Button,
   Card,
-  Checkbox,
   DataTable,
   PageHeader,
   Select,

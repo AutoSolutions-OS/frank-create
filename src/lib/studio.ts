@@ -104,6 +104,29 @@ export function filterSizesForAspect(sizes: string[], aspect: string): string[] 
 }
 
 /**
+ * The cheapest of a model's sizes or resolutions ("1K" before "4K", "480p"
+ * before "1080p"). Options with no readable size keep roster order, so the
+ * first one wins. A run that starts on its own, or whose pick the next model
+ * cannot honour, lands here rather than on the dearest option (ticket
+ * cab71f0b, 19 Nov 2026: a refresh started at 4K x 4).
+ */
+export function lowestOption(options: string[]): string {
+  const ranked = options.filter((option) => resolutionRank(option) > 0);
+  if (!ranked.length) return options[0] ?? "";
+  return ranked.reduce((best, option) => (resolutionRank(option) < resolutionRank(best) ? option : best));
+}
+
+/**
+ * The size to keep when the current one is not offered: the nearest by size
+ * ("4K" on a 1K/2K model becomes "2K"), else the cheapest. Never the dearest.
+ */
+export function nearestImageSize(current: string, sizes: string[]): string {
+  if (!sizes.length) return "";
+  if (sizes.includes(current)) return current;
+  return closestByRank(current, sizes);
+}
+
+/**
  * Provider-specific extras (GPT Image 2.6 quality / background / compression /
  * moderation). Values the selected model doesn't advertise are dropped so a
  * model switch can never send an unsupported field.
@@ -151,9 +174,7 @@ export function normalizeStudioSettingsForModel(settings: StudioSettings, model:
   return normalizeAdvancedImageSettings({
     ...settings,
     aspect_ratio: aspect,
-    image_size: sizesForAspect.includes(settings.image_size)
-      ? settings.image_size
-      : sizesForAspect[sizesForAspect.length - 1] ?? "1K",
+    image_size: nearestImageSize(settings.image_size, sizesForAspect) || "1K",
     count: Math.min(Math.max(count, 1), cap)
   }, model);
 }
@@ -199,7 +220,7 @@ export function normalizeVideoSettings(settings: StudioSettings, model: StudioMo
     video_resolution: resolutions.length
       ? (settings.video_resolution && resolutions.includes(settings.video_resolution)
         ? settings.video_resolution
-        : resolutions[resolutions.length - 1])
+        : lowestOption(resolutions))
       : undefined
   };
 }
@@ -513,11 +534,17 @@ export function parseJsonList(value?: string) {
   }
 }
 
+/**
+ * What a run starts from on a fresh load and after Reset: the cheapest size and
+ * one pick. Picking 4K or 4 picks still works and holds until the page reloads;
+ * nothing stores it, so a refresh comes back here (ticket cab71f0b).
+ */
 export function defaultStudioSettings(model: StudioModel): StudioSettings {
+  const aspect = model.allowed_aspect_ratios[0] ?? "1:1";
   return normalizeAdvancedImageSettings({
-    aspect_ratio: model.allowed_aspect_ratios[0] ?? "1:1",
-    image_size: model.allowed_image_sizes[model.allowed_image_sizes.length - 1] ?? "",
-    count: 4
+    aspect_ratio: aspect,
+    image_size: lowestOption(filterSizesForAspect(model.allowed_image_sizes ?? [], aspect)),
+    count: 1
   }, model);
 }
 
@@ -579,7 +606,7 @@ function closestByRank(target: string, allowed: string[]): string {
   if (!allowed.length) return target;
   if (allowed.includes(target)) return target;
   const wanted = resolutionRank(target);
-  if (!wanted) return allowed[allowed.length - 1];
+  if (!wanted) return lowestOption(allowed);
   return allowed.reduce((best, option) =>
     Math.abs(resolutionRank(option) - wanted) < Math.abs(resolutionRank(best) - wanted) ? option : best
   , allowed[0]);
@@ -632,7 +659,7 @@ export function resolveForModel(
   if (video) {
     const resolutions = model.allowed_resolutions ?? [];
     if (resolutions.length) {
-      const current = settings.video_resolution ?? resolutions[resolutions.length - 1];
+      const current = settings.video_resolution ?? lowestOption(resolutions);
       const resolution = closestByRank(current, resolutions);
       if (settings.video_resolution && resolution !== settings.video_resolution) {
         adjustments.push({
@@ -670,7 +697,7 @@ export function resolveForModel(
     const sizes = model.allowed_image_sizes ?? [];
     if (sizes.length) {
       const forAspect = filterSizesForAspect(sizes, next.aspect_ratio);
-      const current = settings.image_size || forAspect[forAspect.length - 1];
+      const current = settings.image_size || lowestOption(forAspect);
       const size = forAspect.includes(current) ? current : closestByRank(current, forAspect);
       if (settings.image_size && size !== settings.image_size) {
         adjustments.push({
