@@ -58,6 +58,7 @@ import {
   filterSizesForAspect,
   inferenceStatusCopy,
   makeLocalId,
+  nearestImageSize,
   normalizeStudioSettingsForModel,
   parseJsonList,
   selectModelOptions,
@@ -754,9 +755,7 @@ export default function App() {
       if (!modelOptions.allowedImageSizes.length) {
         return { ...current, aspect_ratio: nextAspect, image_size: "" };
       }
-      const nextSize = sizes.includes(current.image_size)
-        ? current.image_size
-        : sizes[sizes.length - 1] ?? "";
+      const nextSize = nearestImageSize(current.image_size, sizes);
       return { ...current, aspect_ratio: nextAspect, image_size: nextSize };
     });
   };
@@ -779,10 +778,8 @@ export default function App() {
       let nextSize: string;
       if (!model.allowed_image_sizes || model.allowed_image_sizes.length === 0) {
         nextSize = "";
-      } else if (sizes.includes(current.image_size)) {
-        nextSize = current.image_size;
       } else {
-        nextSize = sizes[sizes.length - 1] ?? "";
+        nextSize = nearestImageSize(current.image_size, sizes);
       }
       if (nextAspect === current.aspect_ratio && nextSize === current.image_size) return current;
       return { ...current, aspect_ratio: nextAspect, image_size: nextSize };
