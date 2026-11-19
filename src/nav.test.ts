@@ -90,7 +90,7 @@ describe("the studio in the workspace frame", () => {
     expect(hub.map((section) => section.title)).toEqual(OS_HUB_MENU.map((section) => section.title));
     expect(hub.flatMap((section) => section.items.map((row) => row.label))).toEqual([
       "Overview", "Inbox", "Calendar", "Tasks", "Slack", "Monday", "Accounts",
-      "Unmarked Agent", "Signature Generator", "Projects",
+      "Unmarked Agent", "Signature Generator", "Projects", "My feedback",
     ]);
     // Every row is a link into the Hub, none a place of this app; Projects (os 0.4.17) links its own app.
     for (const row of hub.flatMap((section) => section.items)) {
