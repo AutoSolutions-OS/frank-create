@@ -1,0 +1,13 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1795077078784,
+      "tag": "0000_harden_email_queue_functions_and_feedback_insert",
+      "breakpoints": true
+    }
+  ]
+}
